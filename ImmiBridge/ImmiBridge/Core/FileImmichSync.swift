@@ -155,6 +155,7 @@ public final class FileImmichSyncer {
                             replaced += 1
                         } else {
                             skipped += 1
+                            progress(.message("Immich: exists, skipping upload (\(id))"))
                             continue
                         }
                     } catch {
@@ -164,6 +165,7 @@ public final class FileImmichSyncer {
                     }
                 } else {
                     skipped += 1
+                    progress(.message("Immich: exists, skipping upload (\(id))"))
                     continue
                 }
             }
@@ -178,11 +180,15 @@ public final class FileImmichSyncer {
                 try ensureUbiquitousItemIsDownloaded(file.url, timeoutSeconds: options.requestTimeoutSeconds)
                 let filename = file.url.lastPathComponent
                 let meta: [[String: Any]] = [[
-                    "filename": filename,
-                    "type": "file",
-                    "filePath": file.relPath,
-                    "createdAt": iso8601String(file.createdAt),
-                    "modifiedAt": iso8601String(file.modifiedAt),
+                    "key": "mobile-app",
+                    "value": [
+                        "source": "file-sync",
+                        "filename": filename,
+                        "type": "file",
+                        "filePath": file.relPath,
+                        "createdAt": iso8601String(file.createdAt),
+                        "modifiedAt": iso8601String(file.modifiedAt),
+                    ] as [String: Any]
                 ]]
                 _ = try runSync {
                     try await client.uploadAsset(
@@ -200,6 +206,7 @@ public final class FileImmichSyncer {
                     )
                 }
                 uploaded += 1
+                progress(.message("Immich: upload created (\(id))"))
                 evictUbiquitousItemIfPossible(file.url)
             } catch {
                 errors += 1

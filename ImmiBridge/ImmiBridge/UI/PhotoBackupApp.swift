@@ -8,15 +8,23 @@ struct PhotoBackupApp: App {
 
     var body: some Scene {
         WindowGroup(id: "main") {
-            ContentView()
-                .environmentObject(model)
-                .environmentObject(scheduler)
-                .onAppear {
-                    appDelegate.mainWindowVisible = true
+            Group {
+                if model.shouldShowSetupWizard {
+                    SetupWizardView()
+                        .environmentObject(model)
+                        .environmentObject(scheduler)
+                } else {
+                    ContentView()
+                        .environmentObject(model)
+                        .environmentObject(scheduler)
                 }
-                .onDisappear {
-                    appDelegate.mainWindowVisible = false
-                }
+            }
+            .onAppear {
+                appDelegate.mainWindowVisible = true
+            }
+            .onDisappear {
+                appDelegate.mainWindowVisible = false
+            }
         }
         .windowStyle(.hiddenTitleBar)
 

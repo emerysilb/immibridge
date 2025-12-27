@@ -9,7 +9,15 @@
   <a href="https://www.apple.com/macos/"><img src="https://img.shields.io/badge/macOS-13.0+-blue.svg" alt="macOS"></a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/emerysilb/immibridge/releases/"><img src="https://img.shields.io/badge/Download-Latest%20Release-blue?style=for-the-badge" alt="Download latest release"></a>
+</p>
+
 Back up your Apple Photos library to a folder organized by capture date, or directly to an [Immich](https://immich.app) server. Exports originals (including Live Photo paired videos) and optionally rendered edits.
+
+<p align="center">
+  <img src="./assets/screenshot.png" alt="ImmiBridge Screenshot" width="700">
+</p>
 
 ## Features
 

@@ -80,8 +80,8 @@ final class PhotoBackupViewModel: ObservableObject {
         let text: String
     }
 
-    @Published var destinationMode: DestinationMode = .folder
-    @Published var sourceMode: SourceMode = .both
+    @Published var destinationMode: DestinationMode = .immich
+    @Published var sourceMode: SourceMode = .photos
     @Published var destinationPath: String = ""
     @Published var mode: Mode = .originals
     @Published var media: Media = .all
@@ -112,6 +112,7 @@ final class PhotoBackupViewModel: ObservableObject {
 
     @Published private(set) var photosIsConnected: Bool = false
     @Published private(set) var photosConnectionText: String = "Checking…"
+    @Published var shouldShowSetupWizard: Bool = false
 
     @Published private(set) var isRunning: Bool = false
     @Published private(set) var statusText: String = "Idle"
@@ -226,11 +227,22 @@ final class PhotoBackupViewModel: ObservableObject {
             immichDeviceId = id
         }
 
-        refreshPhotosAuthorizationStatus()
+        // Check if first run - show setup wizard if never completed
+        if !defaults.bool(forKey: "hasCompletedSetupWizard") {
+            shouldShowSetupWizard = true
+        }
+
+        // Only auto-request photos permission if not showing wizard
+        refreshPhotosAuthorizationStatus(autoRequest: !shouldShowSetupWizard)
         refreshAlbumsIfPossible()
     }
 
-    func refreshPhotosAuthorizationStatus() {
+    func completeSetupWizard() {
+        defaults.set(true, forKey: "hasCompletedSetupWizard")
+        shouldShowSetupWizard = false
+    }
+
+    func refreshPhotosAuthorizationStatus(autoRequest: Bool = false) {
         let auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         switch auth {
         case .authorized, .limited:
@@ -239,6 +251,9 @@ final class PhotoBackupViewModel: ObservableObject {
         case .notDetermined:
             photosIsConnected = false
             photosConnectionText = "Permission Needed"
+            if autoRequest {
+                requestPhotosAccess()
+            }
         case .denied, .restricted:
             photosIsConnected = false
             photosConnectionText = "No Access"
@@ -303,6 +318,14 @@ final class PhotoBackupViewModel: ObservableObject {
     func setImmichServerURL(_ newValue: String) {
         immichServerURL = newValue
         defaults.set(immichServerURL, forKey: "immichServerURL")
+    }
+
+    func normalizeImmichURL() {
+        let normalized = normalizeImmichBaseURLString(immichServerURL)
+        if !normalized.isEmpty && normalized != immichServerURL {
+            immichServerURL = normalized
+            defaults.set(immichServerURL, forKey: "immichServerURL")
+        }
     }
 
     func chooseDestination() {
@@ -902,7 +925,7 @@ final class PhotoBackupViewModel: ObservableObject {
                     let ms = Int(Date().timeIntervalSince(start) * 1000)
 
                     await MainActor.run { [weak self] in
-                        self?.immichTestStatus = "OK (exist: \(ms)ms)"
+                        self?.immichTestStatus = "Connected (\(ms)ms)"
                         self?.immichIsConnected = true
                         self?.showImmichConnectionError = false
                         self?.immichConnectionErrorMessage = ""

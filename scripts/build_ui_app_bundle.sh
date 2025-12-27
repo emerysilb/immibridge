@@ -25,7 +25,9 @@ cp -R "$ROOT_DIR/.xcodebuild/Build/Products/Release/ImmiBridge.app" "$APP_DIR"
 # Re-sign if a custom identity is provided (for notarization)
 if [[ "$CODESIGN_IDENTITY" != "-" ]]; then
     echo "Re-signing with identity: $CODESIGN_IDENTITY"
-    codesign --force --deep --options runtime --sign "$CODESIGN_IDENTITY" "$APP_DIR"
+    codesign --force --deep --options runtime \
+        --entitlements "$PROJECT_DIR/ImmiBridge/ImmiBridge.entitlements" \
+        --sign "$CODESIGN_IDENTITY" "$APP_DIR"
 fi
 
 echo ""
