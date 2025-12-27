@@ -205,6 +205,10 @@ public struct PhotoBackupOptions: Sendable {
     public var folderExport: FolderExportOptions?
     public var immichUpload: ImmichUploadOptions?
     public var tempDir: URL
+    /// If set, failed Immich uploads will be recorded here (small JSON records; no media files).
+    public var failedUploadsDir: URL?
+    /// If set, exports only these Photos `localIdentifier`s (ignores album scope).
+    public var onlyAssetLocalIdentifiers: Set<String>?
     public var backupMode: BackupMode
     public var mode: Mode
     public var media: Media
@@ -225,6 +229,8 @@ public struct PhotoBackupOptions: Sendable {
         folderExport: FolderExportOptions? = nil,
         immichUpload: ImmichUploadOptions? = nil,
         tempDir: URL,
+        failedUploadsDir: URL? = nil,
+        onlyAssetLocalIdentifiers: Set<String>? = nil,
         backupMode: BackupMode = .smartIncremental,
         mode: Mode = .originals,
         media: Media = .all,
@@ -244,6 +250,8 @@ public struct PhotoBackupOptions: Sendable {
         self.folderExport = folderExport
         self.immichUpload = immichUpload
         self.tempDir = tempDir
+        self.failedUploadsDir = failedUploadsDir
+        self.onlyAssetLocalIdentifiers = onlyAssetLocalIdentifiers
         self.backupMode = backupMode
         self.mode = mode
         self.media = media
@@ -528,7 +536,13 @@ public final class PhotoBackupExporter {
             let session = URLSession(configuration: config)
             let client = ImmichClient(serverURL: immichUpload.serverURL, apiKey: immichUpload.apiKey, session: session)
             immichClient = client
-            immichPipeline = ImmichUploadPipeline(immich: immichUpload, client: client, progress: progressWrapped, shouldCancel: shouldCancel)
+            immichPipeline = ImmichUploadPipeline(
+                immich: immichUpload,
+                client: client,
+                progress: progressWrapped,
+                shouldCancel: shouldCancel,
+                failedUploadsDir: options.failedUploadsDir
+            )
         } else {
             immichClient = nil
             immichPipeline = nil
@@ -569,8 +583,25 @@ public final class PhotoBackupExporter {
         var albumMembershipByAssetId: [String: Set<PhotoBackupOptions.AlbumInfo>] = [:]
         var albumsForSync: [PhotoBackupOptions.AlbumInfo] = []
 
-        switch options.albumScope {
-        case .allPhotos:
+        if let onlyIds = options.onlyAssetLocalIdentifiers, !onlyIds.isEmpty {
+            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: Array(onlyIds), options: nil)
+            filtered.reserveCapacity(fetch.count)
+            fetch.enumerateObjects { asset, _, stop in
+                if shouldCancel() { stop.pointee = true; return }
+                if !assetPassesFilters(asset) { return }
+                filtered.append(asset)
+            }
+            filtered.sort { a, b in
+                let da = a.creationDate ?? .distantPast
+                let db = b.creationDate ?? .distantPast
+                return ascending ? (da < db) : (da > db)
+            }
+            if let limit = options.limit, filtered.count > limit {
+                filtered = Array(filtered.prefix(limit))
+            }
+        } else {
+            switch options.albumScope {
+            case .allPhotos:
             func appendPersonalAssets() {
                 let assets = PHAsset.fetchAssets(with: fetchOptions)
                 filtered.reserveCapacity(min(assets.count, options.limit ?? assets.count))
@@ -626,7 +657,7 @@ public final class PhotoBackupExporter {
                     filtered = Array(filtered.prefix(limit))
                 }
             }
-        case .selectedAlbums(let localIdentifiers):
+            case .selectedAlbums(let localIdentifiers):
             let collections = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: localIdentifiers, options: nil)
             var uniqueById: [String: PHAsset] = [:]
             uniqueById.reserveCapacity(options.limit ?? 1024)
@@ -655,6 +686,7 @@ public final class PhotoBackupExporter {
             }
             if let limit = options.limit, filtered.count > limit {
                 filtered = Array(filtered.prefix(limit))
+            }
             }
         }
 
@@ -1930,6 +1962,21 @@ final class ImmichClient {
 }
 
 private final class ImmichUploadPipeline {
+    private struct FailedUploadRecord: Codable {
+        let savedAt: Date
+        let deviceId: String
+        let deviceAssetId: String
+        let phAssetLocalIdentifier: String?
+        let filename: String
+        let fileCreatedAt: Date
+        let fileModifiedAt: Date
+        let durationSeconds: Double?
+        let isFavorite: Bool?
+        let livePhotoVideoId: String?
+        let metadataJSON: Data
+        let errorDescription: String
+    }
+
     private struct WorkItem {
         let fileURL: URL
         let deleteAfterUpload: URL?
@@ -1951,6 +1998,7 @@ private final class ImmichUploadPipeline {
     private let client: ImmichClient
     private let progress: @Sendable (PhotoBackupProgress) -> Void
     private let shouldCancel: @Sendable () -> Bool
+    private let failedUploadsDir: URL?
 
     private let stateQueue = DispatchQueue(label: "immich-pipeline-state")
     private let hashQueue = DispatchQueue(label: "immich-pipeline-hash", qos: .userInitiated, attributes: .concurrent)
@@ -1987,12 +2035,14 @@ private final class ImmichUploadPipeline {
         immich: ImmichUploadOptions,
         client: ImmichClient,
         progress: @escaping @Sendable (PhotoBackupProgress) -> Void,
-        shouldCancel: @escaping @Sendable () -> Bool
+        shouldCancel: @escaping @Sendable () -> Bool,
+        failedUploadsDir: URL?
     ) {
         self.immich = immich
         self.client = client
         self.progress = progress
         self.shouldCancel = shouldCancel
+        self.failedUploadsDir = failedUploadsDir
         self.inFlightLimiter = DispatchSemaphore(value: immich.maxInFlight)
         self.hashLimiter = DispatchSemaphore(value: immich.hashConcurrency)
         self.uploadLimiter = DispatchSemaphore(value: immich.uploadConcurrency)
@@ -2463,11 +2513,61 @@ private final class ImmichUploadPipeline {
                 }
                 self.finish(work: work, result: .success(result.id))
             } catch {
-                if let deleteAfterUpload = work.deleteAfterUpload {
-                    try? FileManager.default.removeItem(at: deleteAfterUpload)
-                }
+                self.archiveFailedUpload(work: work, error: error)
                 self.finish(work: work, result: .failure(error))
             }
+        }
+    }
+
+    private func archiveFailedUpload(work: WorkItem, error: Error) {
+        guard let failedUploadsDir else { return }
+        do {
+            try FileManager.default.createDirectory(at: failedUploadsDir, withIntermediateDirectories: true, attributes: nil)
+        } catch {
+            progress(.message("ERROR Immich: could not create failed uploads dir: \(error)"))
+            return
+        }
+
+        let uniquePrefix = UUID().uuidString
+        // Do not archive the failed file itself (could silently consume disk).
+        // Always clean up temp files created for upload.
+        if let deleteAfterUpload = work.deleteAfterUpload {
+            try? FileManager.default.removeItem(at: deleteAfterUpload)
+        }
+
+        let metadataJSON: Data = (try? JSONSerialization.data(withJSONObject: work.metadata, options: [])) ?? Data()
+        let phAssetLocalIdentifier: String? = {
+            guard let obj = try? JSONSerialization.jsonObject(with: metadataJSON) as? [[String: Any]] else { return nil }
+            for e in obj {
+                guard let value = e["value"] as? [String: Any] else { continue }
+                if let id = value["phAssetLocalIdentifier"] as? String { return id }
+            }
+            return nil
+        }()
+        let record = FailedUploadRecord(
+            savedAt: Date(),
+            deviceId: work.deviceId,
+            deviceAssetId: work.deviceAssetId,
+            phAssetLocalIdentifier: phAssetLocalIdentifier,
+            filename: work.filename,
+            fileCreatedAt: work.fileCreatedAt,
+            fileModifiedAt: work.fileModifiedAt,
+            durationSeconds: work.durationSeconds,
+            isFavorite: work.isFavorite,
+            livePhotoVideoId: work.livePhotoVideoId,
+            metadataJSON: metadataJSON,
+            errorDescription: String(describing: error)
+        )
+
+        let recordURL = failedUploadsDir.appendingPathComponent("failed-upload-\(uniquePrefix).json", isDirectory: false)
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(record)
+            try data.write(to: recordURL, options: [.atomic])
+            progress(.message("Immich: recorded failed upload (\(work.deviceAssetId))"))
+        } catch {
+            progress(.message("ERROR Immich: could not write failed upload record: \(error)"))
         }
     }
 

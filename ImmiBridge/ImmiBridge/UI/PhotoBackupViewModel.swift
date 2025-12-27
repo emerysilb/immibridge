@@ -80,6 +80,21 @@ final class PhotoBackupViewModel: ObservableObject {
         let text: String
     }
 
+    struct FailedUploadRecord: Codable {
+        let savedAt: Date
+        let deviceId: String
+        let deviceAssetId: String
+        let phAssetLocalIdentifier: String?
+        let filename: String
+        let fileCreatedAt: Date
+        let fileModifiedAt: Date
+        let durationSeconds: Double?
+        let isFavorite: Bool?
+        let livePhotoVideoId: String?
+        let metadataJSON: Data
+        let errorDescription: String
+    }
+
     @Published var destinationMode: DestinationMode = .immich
     @Published var sourceMode: SourceMode = .photos
     @Published var destinationPath: String = ""
@@ -119,12 +134,15 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published private(set) var progressValue: Double = 0
     @Published private(set) var progressTotal: Double = 0
     @Published private(set) var logLines: [LogLine] = []
+    @Published private(set) var errorLines: [LogLine] = []
     @Published private(set) var thumbnail: NSImage? = nil
     @Published private(set) var thumbnailCaption: String = ""
     @Published private(set) var currentAssetName: String = ""
     @Published private(set) var uploadedCount: Int = 0
     @Published private(set) var skippedCount: Int = 0
     @Published private(set) var errorCount: Int = 0
+    @Published private(set) var failedUploadCount: Int = 0
+    @Published private(set) var isExportingFailedUploads: Bool = false
     @Published private(set) var immichExistChecked: Int = 0
     @Published private(set) var immichExistTotal: Int = 0
     @Published private(set) var immichSyncInProgress: Bool = false
@@ -149,6 +167,11 @@ final class PhotoBackupViewModel: ObservableObject {
     private var didShowFirstThumbnail: Bool = false
     private var lastThumbnailRequestId: PHImageRequestID?
     private var skippedAssetIds: Set<String> = []  // Track asset-level skips (not file-level)
+    private var countedImmichUploadErrorAssetIds: Set<String> = []
+    private var currentFailedUploadsDir: URL? = nil
+    private var logBuffer: [LogLine] = []
+    private var logFlushTask: Task<Void, Never>?
+    private var isLogVisible: Bool = false
 
     private let defaults = UserDefaults.standard
     private let keychain = KeychainStore(service: "com.emerysilb.immibridge")
@@ -465,6 +488,8 @@ final class PhotoBackupViewModel: ObservableObject {
         progressTotal = 0
         statusText = session != nil ? "Resuming…" : "Starting…"
         logLines = []
+        logBuffer = []
+        errorLines = []
         thumbnail = nil
         thumbnailCaption = ""
         currentAssetName = ""
@@ -511,6 +536,25 @@ final class PhotoBackupViewModel: ObservableObject {
 
         let sortOrder: PhotoBackupOptions.SortOrder = (order == .oldest) ? .oldestFirst : .newestFirst
 
+        // Build config snapshot for session state
+        let configSnapshot = BackupConfigSnapshot(
+            mode: mode.rawValue,
+            media: media.rawValue,
+            sortOrder: order.rawValue,
+            immichServerURL: immichServerURL.isEmpty ? nil : immichServerURL,
+            immichDeviceId: immichDeviceId.isEmpty ? nil : immichDeviceId,
+            folderDestination: destinationPath.isEmpty ? nil : destinationPath
+        )
+
+        // Create or use existing session
+        let sessionToUse = session ?? BackupSessionState(
+            sessionId: UUID().uuidString,
+            startedAt: Date(),
+            lastUpdatedAt: Date(),
+            configSnapshot: configSnapshot
+        )
+        currentSessionState = sessionToUse
+
         let folderExport: FolderExportOptions?
         switch destinationMode {
         case .folder, .both:
@@ -548,6 +592,13 @@ final class PhotoBackupViewModel: ObservableObject {
 
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
         let tempDir = caches.appendingPathComponent("com.local.iphoto-backup-ui/tmp", isDirectory: true)
+        let failedUploadsDir = failedUploadsDirectoryURL().appendingPathComponent(sessionToUse.sessionId, isDirectory: true)
+        currentFailedUploadsDir = failedUploadsDir
+        try? FileManager.default.createDirectory(at: failedUploadsDir, withIntermediateDirectories: true, attributes: nil)
+        failedUploadCount = countFailedUploadRecords(in: failedUploadsDir)
+
+        countedImmichUploadErrorAssetIds = []
+        errorLines = []
         let albumScope: PhotoBackupOptions.AlbumScope = {
             switch albumSource {
             case .allPhotos:
@@ -560,6 +611,7 @@ final class PhotoBackupViewModel: ObservableObject {
             folderExport: folderExport,
             immichUpload: immichUpload,
             tempDir: tempDir,
+            failedUploadsDir: failedUploadsDir,
             backupMode: backupMode.coreValue,
             mode: PhotoBackupOptions.Mode(rawValue: mode.rawValue) ?? .originals,
             media: PhotoBackupOptions.Media(rawValue: media.rawValue) ?? .all,
@@ -574,25 +626,6 @@ final class PhotoBackupViewModel: ObservableObject {
             requestTimeoutSeconds: timeoutSeconds,
             collisionPolicy: .skipIdenticalElseRename
         )
-
-        // Build config snapshot for session state
-        let configSnapshot = BackupConfigSnapshot(
-            mode: mode.rawValue,
-            media: media.rawValue,
-            sortOrder: order.rawValue,
-            immichServerURL: immichServerURL.isEmpty ? nil : immichServerURL,
-            immichDeviceId: immichDeviceId.isEmpty ? nil : immichDeviceId,
-            folderDestination: destinationPath.isEmpty ? nil : destinationPath
-        )
-
-        // Create or use existing session
-        let sessionToUse = session ?? BackupSessionState(
-            sessionId: UUID().uuidString,
-            startedAt: Date(),
-            lastUpdatedAt: Date(),
-            configSnapshot: configSnapshot
-        )
-        currentSessionState = sessionToUse
 
         // Capture references for the detached task
         let runStateRef = runState
@@ -729,6 +762,11 @@ final class PhotoBackupViewModel: ObservableObject {
                 let fileSummaryConst = fileSummary
                 await MainActor.run { [weakSelf] in
                     guard let self = weakSelf else { return }
+
+                    // Prefer the core result’s count when it is larger (it includes pipeline-level errors
+                    // that might not map 1:1 to log lines), while preserving file-backup errors.
+                    self.errorCount = max(self.errorCount, result.errorCount)
+                    self.failedUploadCount = self.countFailedUploadRecords(in: self.currentFailedUploadsDir)
 
                     if result.wasPaused {
                         // Save session state for resume
@@ -1052,6 +1090,22 @@ final class PhotoBackupViewModel: ObservableObject {
             // Track upload/skip/error counts from messages
             // Count at asset level, not file level (Live Photos have multiple files per asset)
             if msg.hasPrefix("ERROR") {
+                appendError(msg)
+            }
+            if msg.hasPrefix("ERROR Immich upload failed") {
+                if let baseAssetId = extractBaseAssetId(from: msg) {
+                    if !countedImmichUploadErrorAssetIds.contains(baseAssetId) {
+                        countedImmichUploadErrorAssetIds.insert(baseAssetId)
+                        errorCount += 1
+                    }
+                } else {
+                    errorCount += 1
+                }
+            } else if msg.hasPrefix("ERROR Immich: upload failed for file") {
+                errorCount += 1
+            } else if msg.hasPrefix("ERROR processing") || msg.hasPrefix("ERROR exporting") {
+                errorCount += 1
+            } else if msg.hasPrefix("ERROR Files:") {
                 errorCount += 1
             } else if msg.contains("skipping upload") {
                 // Messages like "Immich: exists, skipping upload (deviceAssetId)"
@@ -1080,6 +1134,10 @@ final class PhotoBackupViewModel: ObservableObject {
                         skippedCount += 1
                     }
                 }
+            }
+
+            if msg.hasPrefix("Immich: recorded failed upload") {
+                failedUploadCount = countFailedUploadRecords(in: currentFailedUploadsDir)
             }
         case .iCloudDownloading(_, let baseName, let progress, let attempt):
             // Track when download started
@@ -1123,12 +1181,170 @@ final class PhotoBackupViewModel: ObservableObject {
     }
 
     private func appendLog(_ line: String) {
-        let maxLines = 500
-        let trimBatch = 100
-        logLines.append(LogLine(text: line))
-        // Avoid `removeFirst()` on every append (O(n) shift each time) by trimming in batches.
-        if logLines.count > (maxLines + trimBatch) {
-            logLines.removeFirst(logLines.count - maxLines)
+        let maxBufferLines = 10_000
+        let trimBatch = 500
+        logBuffer.append(LogLine(text: line))
+        if logBuffer.count > (maxBufferLines + trimBatch) {
+            logBuffer.removeFirst(logBuffer.count - maxBufferLines)
+        }
+        scheduleLogFlushIfNeeded()
+    }
+
+    func setLogVisible(_ isVisible: Bool) {
+        isLogVisible = isVisible
+        scheduleLogFlushIfNeeded(force: true)
+    }
+
+    private func scheduleLogFlushIfNeeded(force: Bool = false) {
+        guard isLogVisible || force else { return }
+        guard logFlushTask == nil else { return }
+        logFlushTask = Task { @MainActor [weak self] in
+            // Coalesce many log events into a small number of UI updates.
+            try? await Task.sleep(nanoseconds: 150_000_000) // 0.15s
+            guard let self else { return }
+            self.logLines = Array(self.logBuffer.suffix(500))
+            self.logFlushTask = nil
+        }
+    }
+
+    private func appendError(_ line: String) {
+        let maxLines = 5_000
+        let trimBatch = 250
+        errorLines.append(LogLine(text: line))
+        if errorLines.count > (maxLines + trimBatch) {
+            errorLines.removeFirst(errorLines.count - maxLines)
+        }
+    }
+
+    private func appSupportDirectoryURL() -> URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appDir = appSupport.appendingPathComponent("com.local.iphoto-backup-ui", isDirectory: true)
+        try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true, attributes: nil)
+        return appDir
+    }
+
+    private func failedUploadsDirectoryURL() -> URL {
+        let failed = appSupportDirectoryURL().appendingPathComponent("failed_uploads", isDirectory: true)
+        try? FileManager.default.createDirectory(at: failed, withIntermediateDirectories: true, attributes: nil)
+        return failed
+    }
+
+    private func countFailedUploadRecords(in dir: URL?) -> Int {
+        guard let dir else { return 0 }
+        guard let urls = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return 0 }
+        return urls.filter { $0.lastPathComponent.hasPrefix("failed-upload-") && $0.pathExtension == "json" }.count
+    }
+
+    func openFailedUploadsFolder() {
+        let dir = currentFailedUploadsDir ?? failedUploadsDirectoryURL()
+        NSWorkspace.shared.open(dir)
+    }
+
+    func copyErrorsToClipboard() {
+        let text = errorLines.map(\.text).joined(separator: "\n")
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+    }
+
+    func exportFailedUploadsToFolder() {
+        guard !isRunning else { return }
+        guard !isExportingFailedUploads else { return }
+
+        let dir = currentFailedUploadsDir ?? failedUploadsDirectoryURL()
+        let urls = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        let recordURLs = urls.filter { $0.lastPathComponent.hasPrefix("failed-upload-") && $0.pathExtension == "json" }
+        if recordURLs.isEmpty { return }
+
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose Export Folder"
+        if panel.runModal() != .OK { return }
+        guard let destination = panel.url else { return }
+
+        isExportingFailedUploads = true
+        appendLog("Export: exporting failed uploads to \(destination.path)")
+
+        let modeRaw = mode.rawValue
+        let mediaRaw = media.rawValue
+        let orderValue = order
+        let includeAdjustments = includeAdjustmentData
+        let timeoutValue = timeoutSeconds
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            defer {
+                Task { @MainActor in
+                    self?.isExportingFailedUploads = false
+                }
+            }
+
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            var ids = Set<String>()
+            for recordURL in recordURLs {
+                guard let data = try? Data(contentsOf: recordURL) else { continue }
+                guard let record = try? decoder.decode(FailedUploadRecord.self, from: data) else { continue }
+                if let id = record.phAssetLocalIdentifier, !id.isEmpty {
+                    ids.insert(id)
+                } else {
+                    // Best-effort: strip known suffixes from deviceAssetId.
+                    let suffixes = [":edited", ":pairedVideo", ":video"]
+                    var base = record.deviceAssetId
+                    for s in suffixes {
+                        if base.hasSuffix(s) { base = String(base.dropLast(s.count)) }
+                    }
+                    if !base.isEmpty, !base.hasPrefix("file:") {
+                        ids.insert(base)
+                    }
+                }
+            }
+
+            if ids.isEmpty {
+                await MainActor.run { self?.appendLog("Export: no Photos asset ids found in failed upload records.") }
+                return
+            }
+
+            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            let tempDir = caches.appendingPathComponent("com.local.iphoto-backup-ui/tmp", isDirectory: true)
+
+            let options = PhotoBackupOptions(
+                folderExport: FolderExportOptions(destination: destination),
+                immichUpload: nil,
+                tempDir: tempDir,
+                failedUploadsDir: nil,
+                onlyAssetLocalIdentifiers: ids,
+                backupMode: .full,
+                mode: PhotoBackupOptions.Mode(rawValue: modeRaw) ?? .originals,
+                media: PhotoBackupOptions.Media(rawValue: mediaRaw) ?? .all,
+                sortOrder: (orderValue == .oldest) ? .oldestFirst : .newestFirst,
+                limit: nil,
+                dryRun: false,
+                since: nil,
+                albumScope: .allPhotos,
+                libraryScope: .personalAndShared,
+                includeAdjustmentData: includeAdjustments,
+                networkAccessAllowed: true,
+                requestTimeoutSeconds: timeoutValue
+            )
+
+            do {
+                let exporter = PhotoBackupExporter()
+                _ = try exporter.export(
+                    options: options,
+                    progress: { event in
+                        if case .message(let msg) = event {
+                            Task { @MainActor in self?.appendLog("Export: \(msg)") }
+                        }
+                    },
+                    runState: { .running },
+                    sessionState: nil
+                )
+                await MainActor.run { self?.appendLog("Export: done") }
+            } catch {
+                await MainActor.run { self?.appendLog("ERROR Export: \(error)") }
+            }
         }
     }
 
@@ -1199,9 +1415,13 @@ final class PhotoBackupViewModel: ObservableObject {
         // Reset UI state
         clearSessionState()
         logLines = []
+        logBuffer = []
+        errorLines = []
         uploadedCount = 0
         skippedCount = 0
         errorCount = 0
+        failedUploadCount = 0
+        countedImmichUploadErrorAssetIds = []
         immichExistChecked = 0
         immichExistTotal = 0
         immichSyncInProgress = false

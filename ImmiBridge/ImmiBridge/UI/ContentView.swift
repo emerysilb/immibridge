@@ -5,6 +5,7 @@ struct ContentView: View {
     @EnvironmentObject private var scheduler: BackupScheduler
     @State private var immichAutoTestTask: Task<Void, Never>?
     @State private var isLogDrawerOpen: Bool = false
+    @State private var showErrorsSheet: Bool = false
     @State private var showResetConfirm: Bool = false
     @State private var wipeManifestOnReset: Bool = true
 
@@ -98,6 +99,9 @@ struct ContentView: View {
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 18)
+            .onChange(of: isLogDrawerOpen) { isOpen in
+                model.setLogVisible(isOpen)
+            }
             .alert("Reset and start fresh?", isPresented: $showResetConfirm) {
                 Button("Reset", role: .destructive) {
                     model.resetAndStartFresh(wipeManifestDatabase: wipeManifestOnReset)
@@ -114,6 +118,7 @@ struct ContentView: View {
         .onAppear {
             model.refreshPhotosAuthorizationStatus()
             model.checkForResumableSession()
+            model.setLogVisible(isLogDrawerOpen)
             scheduleImmichAutoTest()
             scheduler.bind(to: model)
         }
@@ -834,12 +839,20 @@ private extension ContentView {
                             .foregroundStyle(DesignSystem.Colors.textSecondary)
                     }
                     VStack(spacing: 2) {
-                        Text("\(model.errorCount)")
-                            .font(.system(.title2, design: .rounded).bold())
-                            .foregroundStyle(model.errorCount > 0 ? Color.red : DesignSystem.Colors.textSecondary)
-                        Text("Errors")
-                            .font(.system(.caption2, design: .rounded))
-                            .foregroundStyle(DesignSystem.Colors.textSecondary)
+                        Button {
+                            showErrorsSheet = true
+                        } label: {
+                            VStack(spacing: 2) {
+                                Text("\(model.errorCount)")
+                                    .font(.system(.title2, design: .rounded).bold())
+                                    .foregroundStyle(model.errorCount > 0 ? Color.red : DesignSystem.Colors.textSecondary)
+                                Text("Errors")
+                                    .font(.system(.caption2, design: .rounded))
+                                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help("View errors and failed uploads")
                     }
                 }
                 .frame(width: 200, alignment: .center)
@@ -863,6 +876,10 @@ private extension ContentView {
         .padding(18)
         .cardBackground()
         .frame(height: 110)
+        .sheet(isPresented: $showErrorsSheet) {
+            ErrorsSheetView()
+                .environmentObject(model)
+        }
     }
 
     func scheduleImmichAutoTest() {
@@ -888,5 +905,50 @@ private func backupModeHelpText(_ mode: PhotoBackupViewModel.BackupModeUI) -> St
         return "Full: re-exports everything every run (no manifest-based skipping)."
     case .mirror:
         return "Mirror: like Smart Incremental, but also deletes files from the backup destination when the source no longer contains them. Never deletes from Photos/iCloud."
+    }
+}
+
+private struct ErrorsSheetView: View {
+    @EnvironmentObject private var model: PhotoBackupViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Errors")
+                    .font(.system(.title2, design: .rounded).bold())
+                Spacer()
+                Button("Copy") {
+                    model.copyErrorsToClipboard()
+                }
+                Button("Open Failed Uploads Log") {
+                    model.openFailedUploadsFolder()
+                }
+                .disabled(model.failedUploadCount == 0)
+                Button(model.isExportingFailedUploads ? "Exporting…" : "Export Failed Assets…") {
+                    model.exportFailedUploadsToFolder()
+                }
+                .disabled(model.isRunning || model.isExportingFailedUploads || model.failedUploadCount == 0)
+                Button("Close") { dismiss() }
+            }
+
+            Text("\(model.failedUploadCount) failed upload(s) recorded (no files saved)")
+                .font(.system(.subheadline, design: .rounded))
+                .foregroundStyle(DesignSystem.Colors.textSecondary)
+
+            if model.errorLines.isEmpty {
+                Text("No errors captured yet.")
+                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            } else {
+                List(model.errorLines) { line in
+                    Text(line.text)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 900, minHeight: 520)
     }
 }
