@@ -1,0 +1,62 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Xcode
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Build artifacts
+.build/
+.xcodebuild/
+
+# CocoaPods (if ever used)
+Pods/
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# Code signing
+*.p12
+*.mobileprovision
+*.provisionprofile
+
+# App archives
+*.xcarchive
+
+# Test outputs
+test_export/
+*.log
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment/secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Distribution
+*.dmg
+*.zip
+
+# Claude Code
+.claude/

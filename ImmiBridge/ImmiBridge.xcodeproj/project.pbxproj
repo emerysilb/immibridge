@@ -1,0 +1,620 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXContainerItemProxy section */
+		E307B0662EF92CF300ED4502 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E307B0502EF92CF200ED4502 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E307B0572EF92CF200ED4502;
+			remoteInfo = ImmiBridge;
+		};
+		E307B0702EF92CF300ED4502 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E307B0502EF92CF200ED4502 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E307B0572EF92CF200ED4502;
+			remoteInfo = ImmiBridge;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		E307B0582EF92CF200ED4502 /* ImmiBridge.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ImmiBridge.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E307B0652EF92CF300ED4502 /* ImmiBridgeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ImmiBridgeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E307B06F2EF92CF300ED4502 /* ImmiBridgeUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ImmiBridgeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		E307B0A22EF92DF800ED4502 /* Exceptions for "ImmiBridge" folder in "ImmiBridgeUITests" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Core/BackupTypes.swift,
+				Core/FileBackupCore.swift,
+				Core/FileImmichSync.swift,
+				Core/ManifestStore.swift,
+				Core/PhotoBackupCore.swift,
+				Core/UbiquitousFiles.swift,
+				UI/AlbumPickerView.swift,
+				UI/AppDelegate.swift,
+				UI/BackupScheduler.swift,
+				UI/Components.swift,
+				UI/ContentView.swift,
+				UI/DesignSystem.swift,
+				UI/Info.plist,
+				UI/MenuBarView.swift,
+				UI/NotificationManager.swift,
+				UI/NotificationSettingsView.swift,
+				UI/PhotoBackupApp.swift,
+				UI/PhotoBackupViewModel.swift,
+				UI/PowerManager.swift,
+				UI/ScheduleSettingsView.swift,
+			);
+			target = E307B06E2EF92CF300ED4502 /* ImmiBridgeUITests */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		E307B05A2EF92CF200ED4502 /* ImmiBridge */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				E307B0A22EF92DF800ED4502 /* Exceptions for "ImmiBridge" folder in "ImmiBridgeUITests" target */,
+			);
+			path = ImmiBridge;
+			sourceTree = "<group>";
+		};
+		E307B0682EF92CF300ED4502 /* ImmiBridgeTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ImmiBridgeTests;
+			sourceTree = "<group>";
+		};
+		E307B0722EF92CF300ED4502 /* ImmiBridgeUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ImmiBridgeUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		E307B0552EF92CF200ED4502 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E307B0622EF92CF300ED4502 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E307B06C2EF92CF300ED4502 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		E307B04F2EF92CF200ED4502 = {
+			isa = PBXGroup;
+			children = (
+				E307B05A2EF92CF200ED4502 /* ImmiBridge */,
+				E307B0682EF92CF300ED4502 /* ImmiBridgeTests */,
+				E307B0722EF92CF300ED4502 /* ImmiBridgeUITests */,
+				E307B0592EF92CF200ED4502 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E307B0592EF92CF200ED4502 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				E307B0582EF92CF200ED4502 /* ImmiBridge.app */,
+				E307B0652EF92CF300ED4502 /* ImmiBridgeTests.xctest */,
+				E307B06F2EF92CF300ED4502 /* ImmiBridgeUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		E307B0572EF92CF200ED4502 /* ImmiBridge */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E307B0792EF92CF300ED4502 /* Build configuration list for PBXNativeTarget "ImmiBridge" */;
+			buildPhases = (
+				E307B0542EF92CF200ED4502 /* Sources */,
+				E307B0552EF92CF200ED4502 /* Frameworks */,
+				E307B0562EF92CF200ED4502 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				E307B05A2EF92CF200ED4502 /* ImmiBridge */,
+			);
+			name = ImmiBridge;
+			packageProductDependencies = (
+			);
+			productName = ImmiBridge;
+			productReference = E307B0582EF92CF200ED4502 /* ImmiBridge.app */;
+			productType = "com.apple.product-type.application";
+		};
+		E307B0642EF92CF300ED4502 /* ImmiBridgeTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E307B07C2EF92CF300ED4502 /* Build configuration list for PBXNativeTarget "ImmiBridgeTests" */;
+			buildPhases = (
+				E307B0612EF92CF300ED4502 /* Sources */,
+				E307B0622EF92CF300ED4502 /* Frameworks */,
+				E307B0632EF92CF300ED4502 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E307B0672EF92CF300ED4502 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				E307B0682EF92CF300ED4502 /* ImmiBridgeTests */,
+			);
+			name = ImmiBridgeTests;
+			packageProductDependencies = (
+			);
+			productName = ImmiBridgeTests;
+			productReference = E307B0652EF92CF300ED4502 /* ImmiBridgeTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		E307B06E2EF92CF300ED4502 /* ImmiBridgeUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E307B07F2EF92CF300ED4502 /* Build configuration list for PBXNativeTarget "ImmiBridgeUITests" */;
+			buildPhases = (
+				E307B06B2EF92CF300ED4502 /* Sources */,
+				E307B06C2EF92CF300ED4502 /* Frameworks */,
+				E307B06D2EF92CF300ED4502 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E307B0712EF92CF300ED4502 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				E307B0722EF92CF300ED4502 /* ImmiBridgeUITests */,
+			);
+			name = ImmiBridgeUITests;
+			packageProductDependencies = (
+			);
+			productName = ImmiBridgeUITests;
+			productReference = E307B06F2EF92CF300ED4502 /* ImmiBridgeUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		E307B0502EF92CF200ED4502 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2620;
+				LastUpgradeCheck = 2620;
+				TargetAttributes = {
+					E307B0572EF92CF200ED4502 = {
+						CreatedOnToolsVersion = 26.2;
+					};
+					E307B0642EF92CF300ED4502 = {
+						CreatedOnToolsVersion = 26.2;
+						TestTargetID = E307B0572EF92CF200ED4502;
+					};
+					E307B06E2EF92CF300ED4502 = {
+						CreatedOnToolsVersion = 26.2;
+						TestTargetID = E307B0572EF92CF200ED4502;
+					};
+				};
+			};
+			buildConfigurationList = E307B0532EF92CF200ED4502 /* Build configuration list for PBXProject "ImmiBridge" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = E307B04F2EF92CF200ED4502;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = E307B0592EF92CF200ED4502 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E307B0572EF92CF200ED4502 /* ImmiBridge */,
+				E307B0642EF92CF300ED4502 /* ImmiBridgeTests */,
+				E307B06E2EF92CF300ED4502 /* ImmiBridgeUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		E307B0562EF92CF200ED4502 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E307B0632EF92CF300ED4502 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E307B06D2EF92CF300ED4502 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		E307B0542EF92CF200ED4502 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E307B0612EF92CF300ED4502 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E307B06B2EF92CF300ED4502 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		E307B0672EF92CF300ED4502 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E307B0572EF92CF200ED4502 /* ImmiBridge */;
+			targetProxy = E307B0662EF92CF300ED4502 /* PBXContainerItemProxy */;
+		};
+		E307B0712EF92CF300ED4502 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E307B0572EF92CF200ED4502 /* ImmiBridge */;
+			targetProxy = E307B0702EF92CF300ED4502 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		E307B0772EF92CF300ED4502 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = UDCDSLM88G;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		E307B0782EF92CF300ED4502 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = UDCDSLM88G;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		E307B07A2EF92CF300ED4502 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = ImmiBridge/ImmiBridge.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = UDCDSLM88G;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2025 Emery Silberman. All rights reserved.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "ImmiBridge needs local network access to connect to your Immich server.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "ImmiBridge needs access to export your Photos library for backup.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "ImmiBridge needs access to export your Photos library for backup.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.emerysilb.ImmiBridge;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		E307B07B2EF92CF300ED4502 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = ImmiBridge/ImmiBridge.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = UDCDSLM88G;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2025 Emery Silberman. All rights reserved.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "ImmiBridge needs local network access to connect to your Immich server.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "ImmiBridge needs access to export your Photos library for backup.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "ImmiBridge needs access to export your Photos library for backup.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.emerysilb.ImmiBridge;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		E307B07D2EF92CF300ED4502 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = UDCDSLM88G;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.emerysilb.ImmiBridgeTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ImmiBridge.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ImmiBridge";
+			};
+			name = Debug;
+		};
+		E307B07E2EF92CF300ED4502 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = UDCDSLM88G;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.emerysilb.ImmiBridgeTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ImmiBridge.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ImmiBridge";
+			};
+			name = Release;
+		};
+		E307B0802EF92CF300ED4502 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = UDCDSLM88G;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.emerysilb.ImmiBridgeUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = ImmiBridge;
+			};
+			name = Debug;
+		};
+		E307B0812EF92CF300ED4502 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = UDCDSLM88G;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.emerysilb.ImmiBridgeUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = ImmiBridge;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		E307B0532EF92CF200ED4502 /* Build configuration list for PBXProject "ImmiBridge" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E307B0772EF92CF300ED4502 /* Debug */,
+				E307B0782EF92CF300ED4502 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E307B0792EF92CF300ED4502 /* Build configuration list for PBXNativeTarget "ImmiBridge" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E307B07A2EF92CF300ED4502 /* Debug */,
+				E307B07B2EF92CF300ED4502 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E307B07C2EF92CF300ED4502 /* Build configuration list for PBXNativeTarget "ImmiBridgeTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E307B07D2EF92CF300ED4502 /* Debug */,
+				E307B07E2EF92CF300ED4502 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E307B07F2EF92CF300ED4502 /* Build configuration list for PBXNativeTarget "ImmiBridgeUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E307B0802EF92CF300ED4502 /* Debug */,
+				E307B0812EF92CF300ED4502 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = E307B0502EF92CF200ED4502 /* Project object */;
+}

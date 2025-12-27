@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>ImmiBridge</string>
+    <key>CFBundleDisplayName</key>
+    <string>ImmiBridge</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>ImmiBridge needs access to export your Photos library for backup.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>ImmiBridge needs access to export your Photos library for backup.</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2025 Emery Silberman. All rights reserved.</string>
+</dict>
+</plist>
