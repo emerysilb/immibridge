@@ -1,7 +1,13 @@
-# ImmiBridge
+<p align="center">
+  <img src="./assets/icon-transparent.png" alt="ImmiBridge" width="128">
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![macOS](https://img.shields.io/badge/macOS-13.0+-blue.svg)](https://www.apple.com/macos/)
+<h1 align="center">ImmiBridge</h1>
+
+<p align="center">
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://www.apple.com/macos/"><img src="https://img.shields.io/badge/macOS-13.0+-blue.svg" alt="macOS"></a>
+</p>
 
 Back up your Apple Photos library to a folder organized by capture date, or directly to an [Immich](https://immich.app) server. Exports originals (including Live Photo paired videos) and optionally rendered edits.
 
@@ -54,11 +60,11 @@ Launch ImmiBridge and configure:
 
 ### Backup Modes
 
-| Mode | Description |
-|------|-------------|
-| **Smart Incremental** | Only exports new/changed photos since last backup |
-| **Full** | Exports all photos matching your filters |
-| **Mirror** | Syncs destination to match source exactly |
+| Mode | Exports | Uses Manifest | Deletes from Destination |
+|------|---------|---------------|--------------------------|
+| **Smart Incremental** | Only new/changed files | Yes | No |
+| **Full** | Everything, every time | No | No |
+| **Mirror** | Only new/changed files | Yes | Yes (orphaned files) |
 
 ### Immich Integration
 
