@@ -142,21 +142,67 @@ The built app will be at `build/ImmiBridge.app`.
    - Any relevant issue numbers
    - Screenshots for UI changes
 
-## Creating a Release
+## Creating a Signed Release
 
-To create a notarized release for distribution:
+To distribute ImmiBridge outside the App Store, the app must be signed with a Developer ID certificate and notarized by Apple. This prevents Gatekeeper warnings for users.
+
+### Prerequisites
+
+1. **Apple Developer Program membership** ($99/year) - [developer.apple.com/programs](https://developer.apple.com/programs)
+
+2. **Developer ID Application certificate**
+   - Go to [developer.apple.com/account/resources/certificates](https://developer.apple.com/account/resources/certificates)
+   - Click **+** → Select **Developer ID Application**
+   - Follow the prompts to create and download the certificate
+   - Double-click to install in Keychain
+
+3. **Verify your certificate is installed:**
+   ```bash
+   security find-identity -v -p codesigning | grep "Developer ID"
+   ```
+
+4. **Create an app-specific password** for notarization:
+   - Go to [appleid.apple.com](https://appleid.apple.com) → Sign-In and Security → App-Specific Passwords
+   - Generate a new password and save it
+
+### Configuration
+
+Copy the example environment file and fill in your values:
 
 ```bash
-export CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-export APPLE_ID="your@email.com"
-export APPLE_TEAM_ID="TEAMID"
-export APPLE_APP_PASSWORD="xxxx-xxxx-xxxx-xxxx"
-export VERSION="1.0.0"
+cp .env.example .env
+```
 
+Edit `.env` with your credentials:
+
+```bash
+CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+APPLE_ID="your@email.com"
+APPLE_TEAM_ID="XXXXXXXXXX"
+APPLE_APP_PASSWORD="xxxx-xxxx-xxxx-xxxx"
+VERSION="1.0.0"
+```
+
+> **Note:** `.env` is git-ignored and will not be committed.
+
+### Building the Release
+
+```bash
 ./scripts/release.sh
 ```
 
-This creates a notarized DMG at `build/ImmiBridge-1.0.0.dmg`.
+This will:
+1. Build the app in Release configuration
+2. Sign it with your Developer ID certificate
+3. Submit to Apple for notarization (takes 1-5 minutes)
+4. Staple the notarization ticket to the app
+5. Create a signed DMG at `build/ImmiBridge-{VERSION}.dmg`
+
+### Uploading to GitHub
+
+```bash
+gh release create v1.0.0 build/ImmiBridge-1.0.0.dmg --title "v1.0.0" --generate-notes
+```
 
 ## Reporting Issues
 

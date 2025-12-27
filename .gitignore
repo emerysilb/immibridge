@@ -51,6 +51,7 @@ test_export/
 # Environment/secrets
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 

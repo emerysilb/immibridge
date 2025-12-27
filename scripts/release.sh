@@ -4,18 +4,22 @@ set -euo pipefail
 # Release script for ImmiBridge
 # Creates a notarized DMG for GitHub distribution
 #
-# Required environment variables:
-#   CODESIGN_IDENTITY    - Your "Developer ID Application: ..." certificate name
-#   APPLE_ID             - Your Apple ID email
-#   APPLE_TEAM_ID        - Your Apple Developer Team ID
-#   APPLE_APP_PASSWORD   - App-specific password (create at appleid.apple.com)
+# Usage:
+#   ./scripts/release.sh
 #
-# Optional:
-#   IMMIBRIDGE_BUNDLE_ID - Bundle identifier (default: com.emerysilb.immibridge)
-#   VERSION              - Version string (default: read from script or 0.1.0)
+# The script automatically loads configuration from .env if present.
+# See .env.example for required variables.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+
+# Load .env file if it exists
+if [[ -f "$ROOT_DIR/.env" ]]; then
+    echo "Loading configuration from .env..."
+    set -a
+    source "$ROOT_DIR/.env"
+    set +a
+fi
 
 # Check required environment variables
 : "${CODESIGN_IDENTITY:?Set CODESIGN_IDENTITY to your Developer ID Application certificate}"

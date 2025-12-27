@@ -34,11 +34,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed build instructions.
 ```bash
 # Clone the repository
 git clone https://github.com/emerysilb/immibridge.git
-cd ImmiBridge
+cd immibridge
 
 # Open in Xcode
 open ImmiBridge/ImmiBridge.xcodeproj
 ```
+
+### Building Signed Releases
+
+To build a notarized DMG for distribution, you need an Apple Developer ID certificate ($99/year). See [CONTRIBUTING.md](CONTRIBUTING.md#creating-a-signed-release) for details.
 
 ## Usage
 
