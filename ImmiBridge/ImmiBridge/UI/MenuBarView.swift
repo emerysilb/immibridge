@@ -1,5 +1,6 @@
 import SwiftUI
 
+@available(macOS 13.0, *)
 struct MenuBarView: View {
     @EnvironmentObject var model: PhotoBackupViewModel
     @EnvironmentObject var scheduler: BackupScheduler
@@ -217,6 +218,7 @@ struct MenuBarButton: View {
     }
 }
 
+@available(macOS 13.0, *)
 #Preview {
     MenuBarView()
         .environmentObject(PhotoBackupViewModel())

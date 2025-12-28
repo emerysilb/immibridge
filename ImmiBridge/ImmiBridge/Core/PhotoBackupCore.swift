@@ -294,6 +294,7 @@ public struct PhotoBackupResult: Sendable {
     public var completedAssets: Int
     public var skippedAssets: Int
     public var errorCount: Int
+    public var dryRunPlan: DryRunPlan?
     /// Whether the export was paused (vs completed or cancelled)
     public var wasPaused: Bool
     /// Set of processed asset localIdentifiers (for resume)
@@ -308,6 +309,7 @@ public struct PhotoBackupResult: Sendable {
         completedAssets: Int,
         skippedAssets: Int,
         errorCount: Int,
+        dryRunPlan: DryRunPlan? = nil,
         wasPaused: Bool = false,
         processedAssetIds: Set<String> = [],
         errorAssetIds: Set<String> = [],
@@ -317,10 +319,54 @@ public struct PhotoBackupResult: Sendable {
         self.completedAssets = completedAssets
         self.skippedAssets = skippedAssets
         self.errorCount = errorCount
+        self.dryRunPlan = dryRunPlan
         self.wasPaused = wasPaused
         self.processedAssetIds = processedAssetIds
         self.errorAssetIds = errorAssetIds
         self.pauseIndex = pauseIndex
+    }
+}
+
+public struct DryRunPlan: Sendable {
+    public var assetsScanned: Int
+    public var imagesScanned: Int
+    public var videosScanned: Int
+    public var livePhotosScanned: Int
+
+    public var immichPlannedUploads: Int
+    public var immichPlannedStillImages: Int
+    public var immichPlannedVideos: Int
+    public var immichPlannedEditedImages: Int
+
+    public var immichWouldSkipExisting: Int
+    public var immichWouldReplaceExisting: Int
+
+    public var notes: [String]
+
+    public init(
+        assetsScanned: Int,
+        imagesScanned: Int,
+        videosScanned: Int,
+        livePhotosScanned: Int,
+        immichPlannedUploads: Int,
+        immichPlannedStillImages: Int,
+        immichPlannedVideos: Int,
+        immichPlannedEditedImages: Int,
+        immichWouldSkipExisting: Int,
+        immichWouldReplaceExisting: Int,
+        notes: [String]
+    ) {
+        self.assetsScanned = assetsScanned
+        self.imagesScanned = imagesScanned
+        self.videosScanned = videosScanned
+        self.livePhotosScanned = livePhotosScanned
+        self.immichPlannedUploads = immichPlannedUploads
+        self.immichPlannedStillImages = immichPlannedStillImages
+        self.immichPlannedVideos = immichPlannedVideos
+        self.immichPlannedEditedImages = immichPlannedEditedImages
+        self.immichWouldSkipExisting = immichWouldSkipExisting
+        self.immichWouldReplaceExisting = immichWouldReplaceExisting
+        self.notes = notes
     }
 }
 
@@ -779,6 +825,200 @@ public final class PhotoBackupExporter {
         }
 
         let albumCollector: AlbumCollector? = (options.immichUpload?.syncAlbums == true) ? AlbumCollector(albums: albumsForSync) : nil
+
+        if options.dryRun {
+            var notes: [String] = []
+            let totalAssets = filtered.count
+            let imagesScanned = filtered.filter { $0.mediaType == .image }.count
+            let videosScanned = filtered.filter { $0.mediaType == .video }.count
+            let livePhotosScanned = filtered.filter { $0.mediaSubtypes.contains(.photoLive) }.count
+
+            var plannedStill = 0
+            var plannedVideos = 0
+            var plannedEdited = 0
+            var wouldSkipExisting = 0
+            var wouldReplaceExisting = 0
+
+            if let immichUpload = options.immichUpload, let immichPipeline {
+                // Reuse the existing "exists sync" batching logic to populate the pipeline's existing-id cache.
+                // This avoids downloading/exporting any asset bytes.
+                do {
+                    let stats = try runSync { try await ImmichClient(serverURL: immichUpload.serverURL, apiKey: immichUpload.apiKey).getAssetStatistics() }
+                    progressWrapped(.message("Immich: server has \(stats.total) assets (\(stats.images) images, \(stats.videos) videos)"))
+                } catch {
+                    progressWrapped(.message("ERROR Immich: could not fetch statistics: \(error)"))
+                }
+
+                var batches: [(ids: [String], units: Int)] = []
+                batches.reserveCapacity(max(1, filtered.count / immichUpload.existBatchSize))
+                var currentIds: [String] = []
+                currentIds.reserveCapacity(immichUpload.existBatchSize)
+                var currentUnits = 0
+
+                func finalizeBatch() {
+                    guard !currentIds.isEmpty else { return }
+                    batches.append((ids: currentIds, units: currentUnits))
+                    currentIds = []
+                    currentIds.reserveCapacity(immichUpload.existBatchSize)
+                    currentUnits = 0
+                }
+
+                for asset in filtered {
+                    if shouldCancel() { break }
+
+                    var ids: [String] = []
+                    ids.reserveCapacity(4)
+
+                    if options.mode == .originals || options.mode == .both {
+                        switch asset.mediaType {
+                        case .image:
+                            ids.append(asset.localIdentifier) // still
+                            if asset.mediaSubtypes.contains(.photoLive) {
+                                // Some Live Photos upload as pairedVideo, others as a live video resource; check both.
+                                ids.append(asset.localIdentifier + ":pairedVideo")
+                                ids.append(asset.localIdentifier + ":video")
+                            }
+                        case .video:
+                            ids.append(asset.localIdentifier + ":video")
+                        default:
+                            break
+                        }
+                    }
+
+                    if options.mode == .edited || options.mode == .both {
+                        if asset.mediaType == .image {
+                            ids.append(asset.localIdentifier + ":edited")
+                        }
+                    }
+
+                    if currentIds.count + ids.count > immichUpload.existBatchSize {
+                        finalizeBatch()
+                    }
+                    if !ids.isEmpty {
+                        currentIds.append(contentsOf: ids)
+                        currentUnits += 1
+                    }
+                }
+                finalizeBatch()
+
+                do {
+                    try immichPipeline.performExistSyncBatches(batches: batches, totalUnits: filtered.count)
+                } catch {
+                    progressWrapped(.message("ERROR Immich: exists sync failed: \(error)"))
+                    notes.append("Immich exist-check failed; counts may be inaccurate.")
+                }
+
+                let existing = immichPipeline.snapshotExistingDeviceAssetIds()
+                notes.append("Dry run uses Immich /assets/exist (device asset ids). Items uploaded from other devices/tools may still be detected as checksum-duplicates during a real run and be skipped.")
+                progressWrapped(.message("Dry run: Immich reports \(existing.count) existing device-asset id(s) for this deviceId"))
+
+                // Count planned outputs and whether each would be skipped/replaced, per the same deviceAssetId scheme
+                // the uploader uses (without exporting).
+                for asset in filtered {
+                    if shouldCancel() { break }
+
+                    if options.mode == .originals || options.mode == .both {
+                        switch asset.mediaType {
+                        case .image:
+                            plannedStill += 1
+                            let stillExists = existing.contains(asset.localIdentifier)
+                            if stillExists {
+                                if immichUpload.updateChangedAssets {
+                                    wouldReplaceExisting += 1
+                                } else {
+                                    wouldSkipExisting += 1
+                                }
+                            }
+
+                            if asset.mediaSubtypes.contains(.photoLive) {
+                                plannedVideos += 1
+                                let pairedExists = existing.contains(asset.localIdentifier + ":pairedVideo")
+                                let videoExists = existing.contains(asset.localIdentifier + ":video")
+                                let liveVideoExists = pairedExists || videoExists
+                                if liveVideoExists {
+                                    if immichUpload.updateChangedAssets {
+                                        wouldReplaceExisting += 1
+                                    } else {
+                                        wouldSkipExisting += 1
+                                    }
+                                }
+                            }
+                        case .video:
+                            plannedVideos += 1
+                            let id = asset.localIdentifier + ":video"
+                            if existing.contains(id) {
+                                if immichUpload.updateChangedAssets {
+                                    wouldReplaceExisting += 1
+                                } else {
+                                    wouldSkipExisting += 1
+                                }
+                            }
+                        default:
+                            break
+                        }
+                    }
+
+                    if options.mode == .edited || options.mode == .both {
+                        if asset.mediaType == .image {
+                            plannedEdited += 1
+                            let id = asset.localIdentifier + ":edited"
+                            if existing.contains(id) {
+                                if immichUpload.updateChangedAssets {
+                                    wouldReplaceExisting += 1
+                                } else {
+                                    wouldSkipExisting += 1
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if immichUpload.syncAlbums {
+                    notes.append("Album sync not simulated in dry run.")
+                }
+                if immichUpload.checksumPrecheck {
+                    notes.append("Checksum-based duplicate detection is not simulated in dry run.")
+                }
+            } else {
+                notes.append("Immich upload not enabled; dry run only reports scan counts.")
+            }
+
+            let plannedUploads = plannedStill + plannedVideos + plannedEdited
+            let plan = DryRunPlan(
+                assetsScanned: totalAssets,
+                imagesScanned: imagesScanned,
+                videosScanned: videosScanned,
+                livePhotosScanned: livePhotosScanned,
+                immichPlannedUploads: plannedUploads,
+                immichPlannedStillImages: plannedStill,
+                immichPlannedVideos: plannedVideos,
+                immichPlannedEditedImages: plannedEdited,
+                immichWouldSkipExisting: wouldSkipExisting,
+                immichWouldReplaceExisting: wouldReplaceExisting,
+                notes: notes
+            )
+
+            let wouldUploadNew = max(0, plannedUploads - wouldSkipExisting - wouldReplaceExisting)
+            progressWrapped(.message("Dry run plan: scanned \(totalAssets) assets (\(imagesScanned) images, \(videosScanned) videos, \(livePhotosScanned) Live Photos)"))
+            progressWrapped(.message("Dry run plan: Immich planned \(plannedUploads) upload(s) — would upload \(wouldUploadNew), skip existing \(wouldSkipExisting), replace existing \(wouldReplaceExisting)"))
+            if !notes.isEmpty {
+                for n in notes {
+                    progressWrapped(.message("Dry run note: \(n)"))
+                }
+            }
+
+            return PhotoBackupResult(
+                attemptedAssets: totalAssets,
+                completedAssets: 0,
+                skippedAssets: 0,
+                errorCount: 0,
+                dryRunPlan: plan,
+                wasPaused: false,
+                processedAssetIds: [],
+                errorAssetIds: [],
+                pauseIndex: nil
+            )
+        }
 
         // If Immich is enabled, perform a full "exists sync" up-front so we can show progress
         // and then start uploading with a complete existing-id set.
@@ -2132,23 +2372,27 @@ private final class ImmichUploadPipeline {
 	        progress(.message("Immich: exists sync complete"))
 	    }
 
-    func preloadExisting(deviceAssetIds: [String]) throws {
-        guard !deviceAssetIds.isEmpty else { return }
-        let deviceId = immich.deviceId
-        var out = Set<String>()
-        out.reserveCapacity(deviceAssetIds.count)
+	    func preloadExisting(deviceAssetIds: [String]) throws {
+	        guard !deviceAssetIds.isEmpty else { return }
+	        let deviceId = immich.deviceId
+	        var out = Set<String>()
+	        out.reserveCapacity(deviceAssetIds.count)
         for chunk in deviceAssetIds.chunked(into: immich.existBatchSize) {
             if shouldCancel() { break }
             let existing = try runSync { try await self.client.checkExistingAssets(deviceId: deviceId, deviceAssetIds: chunk) }
             out.formUnion(existing)
         }
-        existingDeviceAssetIds = out
-    }
+	        existingDeviceAssetIds = out
+	    }
 
-    func enqueue(
-        fileURL: URL,
-        deleteAfterUpload: URL?,
-        deviceAssetId: String,
+	    func snapshotExistingDeviceAssetIds() -> Set<String> {
+	        stateQueue.sync { existingDeviceAssetIds }
+	    }
+
+	    func enqueue(
+	        fileURL: URL,
+	        deleteAfterUpload: URL?,
+	        deviceAssetId: String,
         filename: String,
         fileCreatedAt: Date,
         fileModifiedAt: Date,

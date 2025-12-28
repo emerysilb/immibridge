@@ -146,6 +146,7 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published private(set) var immichExistChecked: Int = 0
     @Published private(set) var immichExistTotal: Int = 0
     @Published private(set) var immichSyncInProgress: Bool = false
+    @Published private(set) var lastDryRunPlan: DryRunPlan? = nil
 
     // iCloud download state
     @Published private(set) var isDownloadingFromiCloud: Bool = false
@@ -479,6 +480,12 @@ final class PhotoBackupViewModel: ObservableObject {
         startWithSession(nil)
     }
 
+    func startDryRun() {
+        // Do not clear any resumable session state; this is a plan-only preview.
+        dryRun = true
+        startWithSession(nil)
+    }
+
     private func startWithSession(_ session: BackupSessionState?) {
         guard canStart else { return }
         isRunning = true
@@ -511,6 +518,7 @@ final class PhotoBackupViewModel: ObservableObject {
         immichExistChecked = 0
         immichExistTotal = 0
         immichSyncInProgress = false
+        lastDryRunPlan = nil
 
         let normalizedImmichURL = normalizeImmichBaseURLString(immichServerURL)
         if normalizedImmichURL != immichServerURL {
@@ -767,6 +775,26 @@ final class PhotoBackupViewModel: ObservableObject {
                     // that might not map 1:1 to log lines), while preserving file-backup errors.
                     self.errorCount = max(self.errorCount, result.errorCount)
                     self.failedUploadCount = self.countFailedUploadRecords(in: self.currentFailedUploadsDir)
+
+                    if dryRunValue, let plan = result.dryRunPlan {
+                        self.lastDryRunPlan = plan
+                        // Reuse the existing summary counters area for the dry-run results.
+                        // Note: these counts are "upload items" (still/video/edited), not Photos asset count.
+                        self.uploadedCount = max(0, plan.immichPlannedUploads - plan.immichWouldSkipExisting - plan.immichWouldReplaceExisting)
+                        self.skippedCount = plan.immichWouldSkipExisting
+                        self.statusText = "Dry run (device id): would upload \(self.uploadedCount), skip \(plan.immichWouldSkipExisting), replace \(plan.immichWouldReplaceExisting) (\(plan.assetsScanned) assets scanned)"
+                        self.appendLog("Dry run complete: planned \(plan.immichPlannedUploads) uploads — would upload \(self.uploadedCount), skip \(plan.immichWouldSkipExisting), replace \(plan.immichWouldReplaceExisting)")
+                        if !plan.notes.isEmpty {
+                            for n in plan.notes {
+                                self.appendLog("Dry run note: \(n)")
+                            }
+                        }
+                        self.dryRun = false
+                        self.checkForResumableSession()
+                        self.isRunning = false
+                        self.isPaused = false
+                        return
+                    }
 
                     if result.wasPaused {
                         // Save session state for resume

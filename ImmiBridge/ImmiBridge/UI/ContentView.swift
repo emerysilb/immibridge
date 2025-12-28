@@ -70,7 +70,9 @@ struct ContentView: View {
                         .buttonStyle(.bordered)
                         .tint(.red)
                         .disabled(model.isRunning)
-                        LabeledContent("Timeout (sec)") {
+                        HStack(spacing: 8) {
+                            Text("Timeout (sec)")
+                                .foregroundStyle(DesignSystem.Colors.textSecondary)
                             TextField("", value: $model.timeoutSeconds, format: .number)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 90)
@@ -388,6 +390,7 @@ private extension ContentView {
 
                 Toggle("Include Adjustment Data", isOn: $model.includeAdjustmentData)
                     .disabled(model.isRunning)
+
             }
             .padding(14)
             .background(Color.black.opacity(0.14))
@@ -716,8 +719,26 @@ private extension ContentView {
                     }
                     .buttonStyle(SecondaryButtonStyle(isDestructive: false, height: 56))
                     .disabled(!model.canStart)
+
+                    Button {
+                        model.startDryRun()
+                    } label: {
+                        Text("Dry Run")
+                    }
+                    .buttonStyle(SecondaryButtonStyle(isDestructive: false, height: 56))
+                    .disabled(!model.canStart)
+                    .help("Plan-only: checks Immich for existing device asset IDs; does not export or upload.")
                 } else {
                     // Normal start state
+                    Button {
+                        model.startDryRun()
+                    } label: {
+                        Text("Dry Run")
+                    }
+                    .buttonStyle(SecondaryButtonStyle(isDestructive: false, height: 56))
+                    .disabled(!model.canStart)
+                    .help("Plan-only: checks Immich for existing device asset IDs; does not export or upload.")
+
                     Button {
                         model.start()
                     } label: {

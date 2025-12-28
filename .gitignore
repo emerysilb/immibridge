@@ -19,7 +19,8 @@ xcuserdata/
 
 # Build artifacts
 .build/
-.xcodebuild/
+.xcodebuild*/
+ImmiBridge/build/
 
 # CocoaPods (if ever used)
 Pods/
@@ -56,6 +57,7 @@ test_export/
 *.key
 
 # Distribution
+*.app
 *.dmg
 *.zip
 

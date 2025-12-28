@@ -1,12 +1,14 @@
 import AppKit
+import SwiftUI
 import UserNotifications
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var mainWindowVisible = false {
-        didSet {
-            updateActivationPolicy()
-        }
-    }
+    let model = PhotoBackupViewModel()
+    let scheduler = BackupScheduler()
+
+    private var statusItem: NSStatusItem?
+    private let statusMenu = NSMenu()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Request notification permissions
@@ -19,21 +21,154 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
+
+        setupStatusItem()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // Keep running in menu bar when window is closed
+        // Keep running so scheduled backups can continue; the menu bar item can reopen the window.
         return false
-    }
-
-    private func updateActivationPolicy() {
-        // Show in Dock when window is visible, hide when closed to menu bar
-        NSApp.setActivationPolicy(mainWindowVisible ? .regular : .accessory)
     }
 
     @objc private func handleWake() {
         // Notify scheduler to check for missed backups
         NotificationCenter.default.post(name: .systemDidWake, object: nil)
+    }
+
+    private func setupStatusItem() {
+        statusMenu.delegate = self
+
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.image = statusImage()
+        item.menu = statusMenu
+        statusItem = item
+
+        rebuildStatusMenu()
+    }
+
+    private func rebuildStatusMenu() {
+        statusMenu.removeAllItems()
+
+        let titleItem = NSMenuItem(title: statusTitle(), action: nil, keyEquivalent: "")
+        titleItem.isEnabled = false
+        statusMenu.addItem(titleItem)
+        statusMenu.addItem(NSMenuItem.separator())
+
+        statusMenu.addItem(NSMenuItem(
+            title: "Open Main Window",
+            action: #selector(openMainWindow),
+            keyEquivalent: "o"
+        ))
+
+        if model.isRunning {
+            if model.isPaused {
+                statusMenu.addItem(NSMenuItem(
+                    title: "Resume Backup",
+                    action: #selector(resumeBackup),
+                    keyEquivalent: "r"
+                ))
+            } else {
+                statusMenu.addItem(NSMenuItem(
+                    title: "Pause Backup",
+                    action: #selector(pauseBackup),
+                    keyEquivalent: "p"
+                ))
+            }
+            statusMenu.addItem(NSMenuItem(
+                title: "Stop Backup",
+                action: #selector(stopBackup),
+                keyEquivalent: "."
+            ))
+        } else {
+            statusMenu.addItem(NSMenuItem(
+                title: "Run Backup Now",
+                action: #selector(runBackupNow),
+                keyEquivalent: "r"
+            ))
+        }
+
+        statusMenu.addItem(NSMenuItem.separator())
+        statusMenu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
+
+        statusItem?.button?.image = statusImage()
+    }
+
+    private func statusTitle() -> String {
+        if model.isRunning {
+            return model.isPaused ? "ImmiBridge — Paused" : "ImmiBridge — Backing Up…"
+        }
+        if model.errorCount > 0 {
+            return "ImmiBridge — Completed with Errors"
+        }
+        return scheduler.isEnabled ? "ImmiBridge — Scheduled" : "ImmiBridge — Ready"
+    }
+
+    private func statusImage() -> NSImage? {
+        let symbolName: String = {
+            if model.isRunning {
+                return model.isPaused ? "pause.circle.fill" : "arrow.clockwise.circle.fill"
+            }
+            if model.errorCount > 0 {
+                return "exclamationmark.circle.fill"
+            }
+            return scheduler.isEnabled ? "clock.circle" : "arrow.clockwise.circle"
+        }()
+
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "ImmiBridge")
+        image?.isTemplate = true
+        return image
+    }
+
+    @objc private func openMainWindow() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+
+        if let existing = NSApp.windows.first(where: { !($0 is NSPanel) && $0.isVisible })
+            ?? NSApp.windows.first(where: { !($0 is NSPanel) })
+        {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        // If the user closed the last SwiftUI window, create a new one.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 720),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "ImmiBridge"
+        window.center()
+        window.contentViewController = NSHostingController(
+            rootView: MainRootView()
+                .environmentObject(model)
+                .environmentObject(scheduler)
+        )
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func runBackupNow() {
+        model.start()
+        rebuildStatusMenu()
+    }
+
+    @objc private func pauseBackup() {
+        model.pause()
+        rebuildStatusMenu()
+    }
+
+    @objc private func resumeBackup() {
+        model.resume()
+        rebuildStatusMenu()
+    }
+
+    @objc private func stopBackup() {
+        model.cancel()
+        rebuildStatusMenu()
+    }
+
+    @objc private func quitApp() {
+        NSApp.terminate(nil)
     }
 
     deinit {
@@ -43,4 +178,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension Notification.Name {
     static let systemDidWake = Notification.Name("systemDidWake")
+}
+
+extension AppDelegate: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) {
+        rebuildStatusMenu()
+    }
 }

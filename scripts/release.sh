@@ -27,64 +27,77 @@ fi
 : "${APPLE_TEAM_ID:?Set APPLE_TEAM_ID to your Apple Developer Team ID}"
 : "${APPLE_APP_PASSWORD:?Set APPLE_APP_PASSWORD to an app-specific password}"
 
-APP_DIR="$ROOT_DIR/build/ImmiBridge.app"
 VERSION="${VERSION:-0.1.0}"
-DMG_NAME="ImmiBridge-${VERSION}.dmg"
-DMG_PATH="$ROOT_DIR/build/$DMG_NAME"
-ZIP_PATH="$ROOT_DIR/build/ImmiBridge.zip"
+DMG_ARM64_PATH="$ROOT_DIR/build/ImmiBridge-${VERSION}-arm64.dmg"
+DMG_X86_64_PATH="$ROOT_DIR/build/ImmiBridge-${VERSION}-x86_64.dmg"
 
-echo "==> Building ImmiBridge v${VERSION}..."
-export CODESIGN_IDENTITY
-"$ROOT_DIR/scripts/build_ui_app_bundle.sh"
+build_and_notarize() {
+    local arch="$1"
+    local app_dir="$ROOT_DIR/build/ImmiBridge-${arch}.app"
+    local zip_path="$ROOT_DIR/build/ImmiBridge-${VERSION}-${arch}.zip"
+    local dmg_path="$ROOT_DIR/build/ImmiBridge-${VERSION}-${arch}.dmg"
+    local derived_data_path="$ROOT_DIR/.xcodebuild-${arch}"
 
-echo ""
-echo "==> Verifying code signature..."
-codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+    echo "==> Building ImmiBridge v${VERSION} (${arch})..."
+    rm -rf "$derived_data_path"
+    export CODESIGN_IDENTITY
+    DESTINATION="platform=macOS,arch=${arch}" \
+        DERIVED_DATA_PATH="$derived_data_path" \
+        OUTPUT_APP_DIR="$app_dir" \
+        "$ROOT_DIR/scripts/build_ui_app_bundle.sh"
 
-echo ""
-echo "==> Creating ZIP for notarization..."
-rm -f "$ZIP_PATH"
-ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
+    echo ""
+    echo "==> Verifying code signature (${arch})..."
+    codesign --verify --deep --strict --verbose=2 "$app_dir"
 
-echo ""
-echo "==> Submitting for notarization (this may take a few minutes)..."
-xcrun notarytool submit "$ZIP_PATH" \
-    --apple-id "$APPLE_ID" \
-    --password "$APPLE_APP_PASSWORD" \
-    --team-id "$APPLE_TEAM_ID" \
-    --wait
+    echo ""
+    echo "==> Creating ZIP for notarization (${arch})..."
+    rm -f "$zip_path"
+    ditto -c -k --keepParent "$app_dir" "$zip_path"
 
-echo ""
-echo "==> Stapling notarization ticket..."
-xcrun stapler staple "$APP_DIR"
+    echo ""
+    echo "==> Submitting for notarization (${arch})..."
+    xcrun notarytool submit "$zip_path" \
+        --apple-id "$APPLE_ID" \
+        --password "$APPLE_APP_PASSWORD" \
+        --team-id "$APPLE_TEAM_ID" \
+        --wait
 
-echo ""
-echo "==> Verifying notarization..."
-spctl --assess --type execute --verbose "$APP_DIR"
+    echo ""
+    echo "==> Stapling notarization ticket (${arch})..."
+    xcrun stapler staple "$app_dir"
 
-echo ""
-echo "==> Creating DMG..."
-rm -f "$DMG_PATH"
-hdiutil create -volname "ImmiBridge" -srcfolder "$APP_DIR" -ov -format UDZO "$DMG_PATH"
+    echo ""
+    echo "==> Verifying notarization (${arch})..."
+    spctl --assess --type execute --verbose "$app_dir"
 
-echo ""
-echo "==> Notarizing DMG..."
-xcrun notarytool submit "$DMG_PATH" \
-    --apple-id "$APPLE_ID" \
-    --password "$APPLE_APP_PASSWORD" \
-    --team-id "$APPLE_TEAM_ID" \
-    --wait
+    echo ""
+    echo "==> Creating DMG (${arch})..."
+    rm -f "$dmg_path"
+    hdiutil create -volname "ImmiBridge (${arch})" -srcfolder "$app_dir" -ov -format UDZO "$dmg_path"
 
-xcrun stapler staple "$DMG_PATH"
+    echo ""
+    echo "==> Notarizing DMG (${arch})..."
+    xcrun notarytool submit "$dmg_path" \
+        --apple-id "$APPLE_ID" \
+        --password "$APPLE_APP_PASSWORD" \
+        --team-id "$APPLE_TEAM_ID" \
+        --wait
 
-# Cleanup
-rm -f "$ZIP_PATH"
+    xcrun stapler staple "$dmg_path"
+
+    rm -f "$zip_path"
+}
+
+build_and_notarize "arm64"
+build_and_notarize "x86_64"
 
 echo ""
 echo "================================================"
 echo "Release complete!"
-echo "DMG: $DMG_PATH"
+echo "DMG (arm64): $DMG_ARM64_PATH"
+echo "DMG (x86_64): $DMG_X86_64_PATH"
 echo ""
 echo "Upload to GitHub:"
-echo "  gh release create v${VERSION} '$DMG_PATH' --title 'v${VERSION}' --generate-notes"
+echo "  gh release create v${VERSION} '$DMG_ARM64_PATH' '$DMG_X86_64_PATH' --title 'v${VERSION}' --generate-notes"
 echo "================================================"
