@@ -2,35 +2,35 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>ImmiBridge</string>
-    <key>CFBundleDisplayName</key>
-    <string>ImmiBridge</string>
-    <key>CFBundleIdentifier</key>
-    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleExecutable</key>
-    <string>$(EXECUTABLE_NAME)</string>
-    <key>SUFeedURL</key>
-    <string></string>
-    <key>SUPublicEDKey</key>
-    <string></string>
-    <key>SUEnableAutomaticChecks</key>
-    <true/>
-    <key>SUScheduledCheckInterval</key>
-    <integer>86400</integer>
-    <key>LSMinimumSystemVersion</key>
-    <string>12.0</string>
-    <key>NSPhotoLibraryUsageDescription</key>
-    <string>ImmiBridge needs access to export your Photos library for backup.</string>
-    <key>NSPhotoLibraryAddUsageDescription</key>
-    <string>ImmiBridge needs access to export your Photos library for backup.</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>Copyright © 2025 Emery Silberman. All rights reserved.</string>
+	<key>CFBundleDisplayName</key>
+	<string>ImmiBridge</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleName</key>
+	<string>ImmiBridge</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.4</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2025 Emery Silberman. All rights reserved.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>ImmiBridge needs access to export your Photos library for backup.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>ImmiBridge needs access to export your Photos library for backup.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://emerysilb.github.io/immibridge/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>fjX+ZZ0VmssNsaRFaejhCJiq+wskWCUMVurJFCiiAEs=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>

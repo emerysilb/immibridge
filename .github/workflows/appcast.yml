@@ -50,7 +50,12 @@ jobs:
           GITHUB_REPO: ${{ github.repository }}
           TAG: ${{ steps.release.outputs.tag }}
           ASSETS_DIR: /tmp/immi-assets
+          SPARKLE_TOOLS_DIR: /tmp/sparkle/bin
         run: |
+          mkdir -p /tmp/sparkle
+          curl -L -o /tmp/sparkle.zip \
+            https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/Sparkle-for-Swift-Package-Manager.zip
+          unzip -q /tmp/sparkle.zip -d /tmp/sparkle
           scripts/generate_appcast.sh
 
       - name: Commit appcast
