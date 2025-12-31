@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 public struct FileImmichSyncOptions: Sendable {
     public var sources: [URL]
@@ -42,6 +43,30 @@ public struct FileImmichSyncResult: Sendable {
         self.replacedFiles = replacedFiles
         self.errorCount = errorCount
     }
+}
+
+private func isSupportedMediaFile(_ url: URL) -> Bool {
+    let ext = url.pathExtension.lowercased()
+
+    // Use UTType to check if the file is an image or video
+    if let type = UTType(filenameExtension: ext) {
+        if type.conforms(to: .image) || type.conforms(to: .movie) {
+            return true
+        }
+    }
+
+    // Fallback: check against a whitelist of supported extensions
+    let supportedExtensions: Set<String> = [
+        // Images
+        "jpg", "jpeg", "png", "gif", "webp", "tiff", "tif", "bmp",
+        "heic", "heif", "avif",
+        // Raw image formats
+        "cr2", "nef", "arw", "dng", "orf", "raf", "rw2", "pef", "srw",
+        // Videos
+        "mp4", "mov", "avi", "mkv", "webm", "m4v", "3gp", "flv", "wmv"
+    ]
+
+    return supportedExtensions.contains(ext)
 }
 
 public final class FileImmichSyncer {
@@ -100,6 +125,9 @@ public final class FileImmichSyncer {
                 let attrs = (try? fm.attributesOfItem(atPath: url.path)) ?? [:]
                 let createdAt = (attrs[.creationDate] as? Date) ?? (attrs[.modificationDate] as? Date) ?? Date()
                 let modifiedAt = (attrs[.modificationDate] as? Date) ?? createdAt
+
+                guard isSupportedMediaFile(url) else { continue }
+
                 files.append((root: standardizedRoot, url: url, relPath: rel, createdAt: createdAt, modifiedAt: modifiedAt))
             }
         }

@@ -1,0 +1,66 @@
+name: Update Sparkle Appcast
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  update-appcast:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve latest release tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName -q .tagName)"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rm -rf /tmp/immi-assets
+          mkdir -p /tmp/immi-assets
+          gh release download "${{ steps.release.outputs.tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir /tmp/immi-assets \
+            --pattern "*.dmg"
+
+      - name: Write Sparkle private key
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [[ -z "${SPARKLE_PRIVATE_KEY}" ]]; then
+            echo "Missing SPARKLE_PRIVATE_KEY secret."
+            exit 1
+          fi
+          printf "%s" "${SPARKLE_PRIVATE_KEY}" > /tmp/sparkle_private_key.pem
+
+      - name: Generate appcast
+        env:
+          SPARKLE_PRIVATE_KEY: /tmp/sparkle_private_key.pem
+          GITHUB_REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag }}
+          ASSETS_DIR: /tmp/immi-assets
+        run: |
+          scripts/generate_appcast.sh
+
+      - name: Commit appcast
+        run: |
+          if git diff --quiet -- docs/appcast.xml; then
+            echo "No appcast changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/appcast.xml
+          git commit -m "chore: update appcast"
+          git push

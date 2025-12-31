@@ -1,10 +1,9 @@
 import SwiftUI
 
-@available(macOS 13.0, *)
+@available(macOS 12.0, *)
 struct MenuBarView: View {
     @EnvironmentObject var model: PhotoBackupViewModel
     @EnvironmentObject var scheduler: BackupScheduler
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -76,6 +75,9 @@ struct MenuBarView: View {
                         MenuBarButton(title: "Run Backup Now", icon: "play.fill") {
                             model.start()
                         }
+                    }
+                    MenuBarButton(title: "Sync Metadata Only", icon: "arrow.triangle.2.circlepath") {
+                        model.startMetadataSync()
                     }
                 }
             }
@@ -171,10 +173,9 @@ struct MenuBarView: View {
             return
         }
 
-        // Create a new main window if none exist.
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "main")
+        // Create a new main window if none exist (only available on macOS 13+).
+        // Post notification to request window opening (handled by WindowOpenerView)
+        NotificationCenter.default.post(name: .openMainWindowRequested, object: nil)
 
         // SwiftUI creates the window asynchronously; bring it to front once it exists.
         Task { @MainActor in
@@ -188,6 +189,28 @@ struct MenuBarView: View {
                 try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
             }
         }
+    }
+}
+
+// Notification name for requesting main window to open
+extension Notification.Name {
+    static let openMainWindowRequested = Notification.Name("openMainWindowRequested")
+}
+
+/// Helper view that handles window opening on macOS 13+
+/// Add this to your app's main WindowGroup or Scene
+@available(macOS 13.0, *)
+struct WindowOpenerView: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onReceive(NotificationCenter.default.publisher(for: .openMainWindowRequested)) { _ in
+                NSApp.setActivationPolicy(.regular)
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "main")
+            }
     }
 }
 
@@ -218,7 +241,7 @@ struct MenuBarButton: View {
     }
 }
 
-@available(macOS 13.0, *)
+@available(macOS 12.0, *)
 #Preview {
     MenuBarView()
         .environmentObject(PhotoBackupViewModel())

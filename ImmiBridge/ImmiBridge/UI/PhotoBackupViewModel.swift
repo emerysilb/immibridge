@@ -124,6 +124,9 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published var showLocalNetworkPermissionNeeded: Bool = false
     @Published var immichSyncAlbums: Bool = false
     @Published var immichUpdateChangedAssets: Bool = false
+    @Published var immichSyncMetadata: Bool = true
+    /// If true, overwrite existing Immich metadata; if false (default), only add missing metadata
+    @Published var immichMetadataOverwrite: Bool = false
 
     @Published private(set) var photosIsConnected: Bool = false
     @Published private(set) var photosConnectionText: String = "Checking…"
@@ -474,15 +477,32 @@ final class PhotoBackupViewModel: ObservableObject {
         start()
     }
 
+    /// Tracks if we're running metadata sync only (no uploads)
+    private var metadataSyncOnlyMode: Bool = false
+
     func start() {
         // Clear any old session when starting fresh
         clearSessionState()
+        metadataSyncOnlyMode = false
         startWithSession(nil)
     }
 
     func startDryRun() {
         // Do not clear any resumable session state; this is a plan-only preview.
         dryRun = true
+        metadataSyncOnlyMode = false
+        startWithSession(nil)
+    }
+
+    /// Start metadata-only sync (no file uploads, just update metadata for existing assets)
+    func startMetadataSync() {
+        guard canStart else { return }
+        guard destinationMode == .immich || destinationMode == .both else {
+            statusText = "Metadata sync requires Immich connection"
+            return
+        }
+        clearSessionState()
+        metadataSyncOnlyMode = true
         startWithSession(nil)
     }
 
@@ -589,7 +609,10 @@ final class PhotoBackupViewModel: ObservableObject {
                     uploadConcurrency: immichUploadConcurrency,
                     hashConcurrency: immichUploadConcurrency,
                     syncAlbums: immichSyncAlbums,
-                    updateChangedAssets: immichUpdateChangedAssets
+                    updateChangedAssets: immichUpdateChangedAssets,
+                    syncMetadata: immichSyncMetadata || metadataSyncOnlyMode,
+                    metadataSyncOnly: metadataSyncOnlyMode,
+                    metadataOverwrite: immichMetadataOverwrite
                 )
             } else {
                 immichUpload = nil
@@ -832,11 +855,13 @@ final class PhotoBackupViewModel: ObservableObject {
                     }
                     self.isRunning = false
                     self.isPaused = false
+                    self.metadataSyncOnlyMode = false
                 }
             } catch {
                 await MainActor.run { [weakSelf] in
                     weakSelf?.isRunning = false
                     weakSelf?.isPaused = false
+                    weakSelf?.metadataSyncOnlyMode = false
                     weakSelf?.statusText = "Error: \(error)"
                     weakSelf?.appendLog("ERROR: \(error)")
                 }
@@ -1191,6 +1216,14 @@ final class PhotoBackupViewModel: ObservableObject {
             isPaused = true
             statusText = "Paused at \(at)/\(total)"
             appendLog("Paused at \(at)/\(total)")
+        case .metadataSyncing(let index, let total, let synced, let skipped, let notInImmich):
+            progressTotal = Double(total)
+            progressValue = Double(index)
+            statusText = "Metadata sync: \(index)/\(total) - \(synced) updated, \(skipped) unchanged"
+            // Log periodically to avoid flooding
+            if index <= 10 || index == total || (index % 500 == 0) {
+                appendLog("Metadata: \(index)/\(total) (synced: \(synced), skipped: \(skipped), not in Immich: \(notInImmich))")
+            }
         case .fileScanning:
             statusText = "Scanning files…"
             appendLog("Files: scanning…")

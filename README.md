@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="https://www.apple.com/macos/"><img src="https://img.shields.io/badge/macOS-13.0+-blue.svg" alt="macOS"></a>
+  <a href="https://www.apple.com/macos/"><img src="https://img.shields.io/badge/macOS-12.0+-blue.svg" alt="macOS"></a>
 </p>
 
 <p align="center">
@@ -29,6 +29,8 @@ Back up your Apple Photos library to a folder organized by capture date, or dire
 - Scheduled automatic backups
 - Menu bar integration
 - iCloud photo download with progress tracking
+- Metadata-only sync (update metadata without re-uploading files)
+- Automatic updates via Sparkle
 
 ## Installation
 
