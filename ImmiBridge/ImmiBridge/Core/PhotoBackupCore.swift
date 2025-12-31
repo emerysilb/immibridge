@@ -1480,7 +1480,8 @@ public final class PhotoBackupExporter {
                     }
                 }
 
-                if let adjustments {
+                // Only export adjustment data to folder (not Immich - it doesn't support .plist/.aae files)
+                if let adjustments, outDir != nil {
                     assetHadAnyWork = true
                     let ext = extFromFilename(adjustments.originalFilename) ?? extFromUTI(adjustments.uniformTypeIdentifier) ?? "aae"
                     let desiredURL = outDir?.appendingPathComponent("\(base)_adjustments.\(ext)", isDirectory: false)
@@ -1497,7 +1498,7 @@ public final class PhotoBackupExporter {
                                 filenameOverride: "\(base)_adjustments.\(ext)",
                                 desiredFolderURL: desiredURL,
                                 options: options,
-                                immichPipeline: immichPipeline,
+                                immichPipeline: nil,  // Never upload adjustment data to Immich
                                 progress: progressWrapped,
                                 livePhotoVideoId: nil,
                                 awaitImmichAssetId: false,
