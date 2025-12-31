@@ -391,6 +391,9 @@ private extension ContentView {
                 Toggle("Include Adjustment Data", isOn: $model.includeAdjustmentData)
                     .disabled(model.isRunning)
 
+                Toggle("Include Hidden Photos", isOn: $model.includeHiddenPhotos)
+                    .disabled(model.isRunning)
+
             }
             .padding(14)
             .background(Color.black.opacity(0.14))
