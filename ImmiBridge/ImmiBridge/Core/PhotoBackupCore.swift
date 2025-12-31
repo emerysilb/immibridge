@@ -346,6 +346,7 @@ public struct PhotoBackupOptions: Sendable {
     public var collisionPolicy: CollisionPolicy
     public var retryConfiguration: RetryConfiguration
     public var iCloudTimeoutMultiplier: Double
+    public var includeHiddenPhotos: Bool
 
     public init(
         folderExport: FolderExportOptions? = nil,
@@ -367,7 +368,8 @@ public struct PhotoBackupOptions: Sendable {
         requestTimeoutSeconds: TimeInterval = 300,
         collisionPolicy: CollisionPolicy = .skipIdenticalElseRename,
         retryConfiguration: RetryConfiguration = .default,
-        iCloudTimeoutMultiplier: Double = 2.0
+        iCloudTimeoutMultiplier: Double = 2.0,
+        includeHiddenPhotos: Bool = false
     ) {
         self.folderExport = folderExport
         self.immichUpload = immichUpload
@@ -389,6 +391,7 @@ public struct PhotoBackupOptions: Sendable {
         self.collisionPolicy = collisionPolicy
         self.retryConfiguration = retryConfiguration
         self.iCloudTimeoutMultiplier = iCloudTimeoutMultiplier
+        self.includeHiddenPhotos = includeHiddenPhotos
     }
 }
 
@@ -793,6 +796,7 @@ public final class PhotoBackupExporter {
         progress(.scanning)
 
         func assetPassesFilters(_ asset: PHAsset) -> Bool {
+            if !options.includeHiddenPhotos && asset.isHidden { return false }
             if let since = options.since, let created = asset.creationDate, created < since { return false }
             switch options.media {
             case .all:
