@@ -1,10 +1,9 @@
 import SwiftUI
 
-@available(macOS 13.0, *)
+@available(macOS 12.0, *)
 struct MenuBarView: View {
     @EnvironmentObject var model: PhotoBackupViewModel
     @EnvironmentObject var scheduler: BackupScheduler
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -171,21 +170,23 @@ struct MenuBarView: View {
             return
         }
 
-        // Create a new main window if none exist.
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "main")
+        // Create a new main window if none exist (only available on macOS 13+).
+        if #available(macOS 13.0, *) {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: "main")
 
-        // SwiftUI creates the window asynchronously; bring it to front once it exists.
-        Task { @MainActor in
-            for _ in 0..<20 {
-                if let w = NSApp.windows.first(where: { !($0 is NSPanel) }) {
-                    NSApp.setActivationPolicy(.regular)
-                    NSApp.activate(ignoringOtherApps: true)
-                    w.makeKeyAndOrderFront(nil)
-                    return
+            // SwiftUI creates the window asynchronously; bring it to front once it exists.
+            Task { @MainActor in
+                for _ in 0..<20 {
+                    if let w = NSApp.windows.first(where: { !($0 is NSPanel) }) {
+                        NSApp.setActivationPolicy(.regular)
+                        NSApp.activate(ignoringOtherApps: true)
+                        w.makeKeyAndOrderFront(nil)
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
                 }
-                try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
             }
         }
     }
@@ -218,7 +219,7 @@ struct MenuBarButton: View {
     }
 }
 
-@available(macOS 13.0, *)
+@available(macOS 12.0, *)
 #Preview {
     MenuBarView()
         .environmentObject(PhotoBackupViewModel())

@@ -17,7 +17,7 @@
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
+    <string>12.0</string>
     <key>NSPhotoLibraryUsageDescription</key>
     <string>ImmiBridge needs access to export your Photos library for backup.</string>
     <key>NSPhotoLibraryAddUsageDescription</key>

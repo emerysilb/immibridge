@@ -6,7 +6,7 @@ Thank you for your interest in contributing to ImmiBridge! This document provide
 
 ### Requirements
 
-- macOS 13.0 or later
+- macOS 12.0 or later
 - Xcode 15.0 or later
 - Apple Developer account (free account works for local development)
 
