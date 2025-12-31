@@ -31,6 +31,15 @@ VERSION="${VERSION:-0.1.0}"
 DMG_ARM64_PATH="$ROOT_DIR/build/ImmiBridge-${VERSION}-arm64.dmg"
 DMG_X86_64_PATH="$ROOT_DIR/build/ImmiBridge-${VERSION}-x86_64.dmg"
 
+sync_version_metadata() {
+    local plist_path="$ROOT_DIR/ImmiBridge/ImmiBridge/UI/Info.plist"
+    local pbxproj_path="$ROOT_DIR/ImmiBridge/ImmiBridge.xcodeproj/project.pbxproj"
+
+    echo "==> Syncing app version metadata to v${VERSION}..."
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$plist_path"
+    perl -pi -e "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = ${VERSION};/g" "$pbxproj_path"
+}
+
 build_and_notarize() {
     local arch="$1"
     local app_dir="$ROOT_DIR/build/ImmiBridge-${arch}.app"
@@ -89,6 +98,7 @@ build_and_notarize() {
     rm -f "$zip_path"
 }
 
+sync_version_metadata
 build_and_notarize "arm64"
 build_and_notarize "x86_64"
 

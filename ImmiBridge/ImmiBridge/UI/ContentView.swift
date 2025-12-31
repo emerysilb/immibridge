@@ -703,7 +703,7 @@ private extension ContentView {
                         .help("Stops after the current item and saves state so you can resume later.")
                     }
                 } else if model.hasResumableSession {
-                    // Not running but has saved session: Resume + Start Fresh
+                    // Not running but has saved session: Resume + Start Fresh + Sync Metadata
                     Button {
                         model.resume()
                     } label: {
@@ -721,15 +721,24 @@ private extension ContentView {
                     .disabled(!model.canStart)
 
                     Button {
-                        model.startDryRun()
+                        model.startMetadataSync()
                     } label: {
-                        Text("Dry Run")
+                        Text("Sync Metadata")
                     }
                     .buttonStyle(SecondaryButtonStyle(isDestructive: false, height: 56))
-                    .disabled(!model.canStart)
-                    .help("Plan-only: checks Immich for existing device asset IDs; does not export or upload.")
+                    .disabled(!model.canStart || model.destinationMode == .folder)
+                    .help("Sync location, favorites, and other metadata for photos already in Immich (no upload).")
                 } else {
                     // Normal start state
+                    Button {
+                        model.startMetadataSync()
+                    } label: {
+                        Text("Sync Metadata")
+                    }
+                    .buttonStyle(SecondaryButtonStyle(isDestructive: false, height: 56))
+                    .disabled(!model.canStart || model.destinationMode == .folder)
+                    .help("Sync location, favorites, and other metadata for photos already in Immich (no upload).")
+
                     Button {
                         model.startDryRun()
                     } label: {

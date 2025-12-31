@@ -116,6 +116,116 @@ public struct FolderExportOptions: Sendable {
     }
 }
 
+// MARK: - Metadata Sync
+
+/// Complete metadata extracted from PHAsset for sync tracking
+public struct PHAssetMetadata: Codable, Sendable, Equatable {
+    // Core identifiers
+    public var localIdentifier: String
+
+    // Dates
+    public var creationDate: Date?
+    public var modificationDate: Date?
+
+    // Location (from CLLocation)
+    public var latitude: Double?
+    public var longitude: Double?
+    public var altitude: Double?
+
+    // User state
+    public var isFavorite: Bool
+    public var isHidden: Bool
+
+    // Dimensions
+    public var pixelWidth: Int
+    public var pixelHeight: Int
+
+    // Burst info
+    public var burstIdentifier: String?
+    public var representsBurst: Bool
+
+    // Media info
+    public var mediaType: Int  // PHAssetMediaType raw value
+    public var duration: TimeInterval
+
+    public init(
+        localIdentifier: String,
+        creationDate: Date? = nil,
+        modificationDate: Date? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        altitude: Double? = nil,
+        isFavorite: Bool = false,
+        isHidden: Bool = false,
+        pixelWidth: Int = 0,
+        pixelHeight: Int = 0,
+        burstIdentifier: String? = nil,
+        representsBurst: Bool = false,
+        mediaType: Int = 0,
+        duration: TimeInterval = 0
+    ) {
+        self.localIdentifier = localIdentifier
+        self.creationDate = creationDate
+        self.modificationDate = modificationDate
+        self.latitude = latitude
+        self.longitude = longitude
+        self.altitude = altitude
+        self.isFavorite = isFavorite
+        self.isHidden = isHidden
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.burstIdentifier = burstIdentifier
+        self.representsBurst = representsBurst
+        self.mediaType = mediaType
+        self.duration = duration
+    }
+
+    /// Generate a signature string for change detection
+    /// Only includes fields that are syncable to Immich
+    public func signature() -> String {
+        var components: [String] = []
+        // Location with 6 decimal precision (~0.1m accuracy)
+        if let lat = latitude, let lon = longitude {
+            components.append("loc:\(String(format: "%.6f", lat)),\(String(format: "%.6f", lon))")
+        }
+        if let alt = altitude {
+            components.append("alt:\(String(format: "%.1f", alt))")
+        }
+        components.append("fav:\(isFavorite)")
+        components.append("hid:\(isHidden)")
+        if let creation = creationDate {
+            components.append("cre:\(Int(creation.timeIntervalSince1970))")
+        }
+        if let mod = modificationDate {
+            components.append("mod:\(Int(mod.timeIntervalSince1970))")
+        }
+        return components.joined(separator: ";")
+    }
+}
+
+/// Mapping between PHAsset localIdentifier and Immich asset ID
+public struct AssetMapping: Sendable {
+    public var localIdentifier: String      // PHAsset.localIdentifier
+    public var immichAssetId: String        // Immich UUID
+    public var deviceAssetId: String        // deviceAssetId used during upload
+    public var lastSyncedSignature: String  // Metadata signature when last synced
+    public var lastSyncedAt: Date
+
+    public init(
+        localIdentifier: String,
+        immichAssetId: String,
+        deviceAssetId: String,
+        lastSyncedSignature: String,
+        lastSyncedAt: Date
+    ) {
+        self.localIdentifier = localIdentifier
+        self.immichAssetId = immichAssetId
+        self.deviceAssetId = deviceAssetId
+        self.lastSyncedSignature = lastSyncedSignature
+        self.lastSyncedAt = lastSyncedAt
+    }
+}
+
 public struct ImmichUploadOptions: Sendable {
     public var serverURL: URL
     public var apiKey: String
@@ -129,6 +239,10 @@ public struct ImmichUploadOptions: Sendable {
     public var maxInFlight: Int
     public var syncAlbums: Bool
     public var updateChangedAssets: Bool
+    /// Sync metadata (location, favorites, etc.) for already-uploaded assets
+    public var syncMetadata: Bool
+    /// Run metadata sync only (skip upload phase)
+    public var metadataSyncOnly: Bool
 
     public init(
         serverURL: URL,
@@ -142,7 +256,9 @@ public struct ImmichUploadOptions: Sendable {
         existBatchSize: Int = 5_000,
         maxInFlight: Int? = nil,
         syncAlbums: Bool = false,
-        updateChangedAssets: Bool = false
+        updateChangedAssets: Bool = false,
+        syncMetadata: Bool = true,
+        metadataSyncOnly: Bool = false
     ) {
         self.serverURL = serverURL
         self.apiKey = apiKey
@@ -156,6 +272,8 @@ public struct ImmichUploadOptions: Sendable {
         self.maxInFlight = maxInFlight ?? max(8, self.uploadConcurrency * 4)
         self.syncAlbums = syncAlbums
         self.updateChangedAssets = updateChangedAssets
+        self.syncMetadata = syncMetadata
+        self.metadataSyncOnly = metadataSyncOnly
     }
 }
 
@@ -525,6 +643,51 @@ final class AtomicCounter: @unchecked Sendable {
     }
 }
 
+// MARK: - Metadata Extraction
+
+/// Extract complete metadata from a PHAsset for sync tracking
+public func extractMetadata(from asset: PHAsset) -> PHAssetMetadata {
+    var metadata = PHAssetMetadata(
+        localIdentifier: asset.localIdentifier,
+        creationDate: asset.creationDate,
+        modificationDate: asset.modificationDate,
+        isFavorite: asset.isFavorite,
+        isHidden: asset.isHidden,
+        pixelWidth: asset.pixelWidth,
+        pixelHeight: asset.pixelHeight,
+        burstIdentifier: asset.burstIdentifier,
+        representsBurst: asset.representsBurst,
+        mediaType: asset.mediaType.rawValue,
+        duration: asset.duration
+    )
+
+    // Extract location from CLLocation
+    if let location = asset.location {
+        metadata.latitude = location.coordinate.latitude
+        metadata.longitude = location.coordinate.longitude
+        metadata.altitude = location.altitude
+    }
+
+    return metadata
+}
+
+/// Check if metadata has changed since last sync
+public func metadataChangedSinceLastSync(
+    asset: PHAsset,
+    mapping: AssetMapping?
+) -> (changed: Bool, currentMetadata: PHAssetMetadata) {
+    let currentMetadata = extractMetadata(from: asset)
+    let currentSignature = currentMetadata.signature()
+
+    guard let mapping = mapping else {
+        // No mapping = never synced, but we can't sync without Immich ID
+        return (changed: false, currentMetadata: currentMetadata)
+    }
+
+    let changed = currentSignature != mapping.lastSyncedSignature
+    return (changed: changed, currentMetadata: currentMetadata)
+}
+
 public final class PhotoBackupExporter {
     public init() {}
 
@@ -603,6 +766,17 @@ public final class PhotoBackupExporter {
             manifest = try? ManifestStore(sqliteURL: manifestURL)
         } else {
             manifest = nil
+        }
+
+        // Asset mapping store for metadata sync
+        let assetMappingStore: AssetMappingStore?
+        if let immichUpload = options.immichUpload, immichUpload.syncMetadata || immichUpload.metadataSyncOnly {
+            let mappingURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+                .appendingPathComponent("ImmiBridge", isDirectory: true)
+                .appendingPathComponent("asset-mappings.sqlite", isDirectory: false)
+            assetMappingStore = try? AssetMappingStore(sqliteURL: mappingURL)
+        } else {
+            assetMappingStore = nil
         }
 
         let calendar = Calendar.current
@@ -1146,6 +1320,15 @@ public final class PhotoBackupExporter {
             ))
         }
 
+        // Skip export/upload phase if metadata sync only mode
+        let skipExportPhase = options.immichUpload?.metadataSyncOnly == true
+
+        if skipExportPhase {
+            progress(.message("Metadata sync only mode - skipping upload phase"))
+            progress(.message("Will sync metadata for \(filtered.count) photos already in Immich"))
+        }
+
+        if !skipExportPhase {
         for (i, asset) in filtered.enumerated() {
             // Check run state at start of each iteration
             let state = runState()
@@ -1538,6 +1721,116 @@ public final class PhotoBackupExporter {
 
                 progressWrapped(.message("Immich: album sync complete"))
             }
+        }
+        } // end if !skipExportPhase
+
+        // MARK: - Metadata Sync Phase
+        if !shouldCancel(),
+           let immichUpload = options.immichUpload,
+           immichUpload.syncMetadata || immichUpload.metadataSyncOnly,
+           let immichClient,
+           let assetMappingStore
+        {
+            progressWrapped(.message("Metadata: starting sync phase..."))
+
+            var metadataSynced = 0
+            var metadataSkipped = 0
+            var metadataErrors = 0
+            var metadataRecovered = 0
+
+            for asset in filtered {
+                if shouldCancel() { break }
+
+                let currentMetadata = extractMetadata(from: asset)
+                let currentSignature = currentMetadata.signature()
+
+                // Check if we have a mapping for this asset
+                var mapping = assetMappingStore.get(localIdentifier: asset.localIdentifier)
+
+                // If no mapping exists, try to recover from Immich by device asset ID
+                if mapping == nil {
+                    let deviceAssetId = asset.localIdentifier
+                    do {
+                        if let immichAssetId = try runSync({ try await immichClient.getAssetIdByDeviceId(deviceId: immichUpload.deviceId, deviceAssetId: deviceAssetId) }) {
+                            // Create mapping for this asset
+                            let newMapping = AssetMapping(
+                                localIdentifier: asset.localIdentifier,
+                                immichAssetId: immichAssetId,
+                                deviceAssetId: deviceAssetId,
+                                lastSyncedSignature: "",  // Empty = needs sync
+                                lastSyncedAt: .distantPast
+                            )
+                            try? assetMappingStore.upsert(newMapping)
+                            mapping = newMapping
+                            metadataRecovered += 1
+                        }
+                    } catch {
+                        // Asset not in Immich yet, skip metadata sync
+                    }
+                }
+
+                guard let mapping = mapping else {
+                    // No mapping = asset not in Immich, skip
+                    continue
+                }
+
+                // Check if metadata has changed
+                if currentSignature == mapping.lastSyncedSignature {
+                    metadataSkipped += 1
+                    continue
+                }
+
+                // Build update DTO
+                var update = ImmichClient.UpdateAssetDto()
+
+                // Location
+                if let lat = currentMetadata.latitude, let lon = currentMetadata.longitude {
+                    update.latitude = lat
+                    update.longitude = lon
+                }
+
+                // Favorites and hidden status
+                update.isFavorite = currentMetadata.isFavorite
+                update.isArchived = currentMetadata.isHidden
+
+                // Creation date
+                if let creation = currentMetadata.creationDate {
+                    update.dateTimeOriginal = iso8601(creation)
+                }
+
+                // Skip if no changes to sync
+                guard update.hasChanges else {
+                    metadataSkipped += 1
+                    continue
+                }
+
+                do {
+                    _ = try runSync { try await immichClient.updateAssetIfExists(assetId: mapping.immichAssetId, update: update) }
+
+                    // Update mapping with new signature
+                    let updatedMapping = AssetMapping(
+                        localIdentifier: mapping.localIdentifier,
+                        immichAssetId: mapping.immichAssetId,
+                        deviceAssetId: mapping.deviceAssetId,
+                        lastSyncedSignature: currentSignature,
+                        lastSyncedAt: Date()
+                    )
+                    try? assetMappingStore.upsert(updatedMapping)
+
+                    metadataSynced += 1
+                } catch {
+                    metadataErrors += 1
+                    progressWrapped(.message("ERROR Metadata: sync failed for \(asset.localIdentifier): \(error)"))
+                }
+            }
+
+            var summaryParts: [String] = []
+            if metadataSynced > 0 { summaryParts.append("synced \(metadataSynced)") }
+            if metadataSkipped > 0 { summaryParts.append("skipped \(metadataSkipped)") }
+            if metadataRecovered > 0 { summaryParts.append("recovered \(metadataRecovered) mappings") }
+            if metadataErrors > 0 { summaryParts.append("errors \(metadataErrors)") }
+            let summary = summaryParts.isEmpty ? "no changes" : summaryParts.joined(separator: ", ")
+            progressWrapped(.message("Metadata: sync complete (\(summary))"))
         }
 
         if options.backupMode == .mirror,
@@ -2122,6 +2415,70 @@ final class ImmichClient {
     func deleteAssets(assetIds: [String]) async throws {
         let body = try JSONSerialization.data(withJSONObject: ["ids": assetIds], options: [])
         _ = try await requestRaw(method: "DELETE", path: "assets", body: body)
+    }
+
+    // MARK: - Metadata Update
+
+    /// Request body for PUT /assets/{id}
+    struct UpdateAssetDto: Encodable {
+        var dateTimeOriginal: String?
+        var description: String?
+        var isFavorite: Bool?
+        var isArchived: Bool?  // Maps to PHAsset.isHidden
+        var latitude: Double?
+        var longitude: Double?
+        var rating: Int?  // -1 to 5
+
+        init(
+            dateTimeOriginal: String? = nil,
+            description: String? = nil,
+            isFavorite: Bool? = nil,
+            isArchived: Bool? = nil,
+            latitude: Double? = nil,
+            longitude: Double? = nil,
+            rating: Int? = nil
+        ) {
+            self.dateTimeOriginal = dateTimeOriginal
+            self.description = description
+            self.isFavorite = isFavorite
+            self.isArchived = isArchived
+            self.latitude = latitude
+            self.longitude = longitude
+            self.rating = rating
+        }
+
+        /// Check if any fields are set (to avoid empty updates)
+        var hasChanges: Bool {
+            dateTimeOriginal != nil || description != nil || isFavorite != nil ||
+            isArchived != nil || latitude != nil || longitude != nil || rating != nil
+        }
+    }
+
+    /// Response from PUT /assets/{id}
+    struct AssetResponseDto: Decodable {
+        let id: String
+        let isFavorite: Bool?
+        let isArchived: Bool?
+    }
+
+    /// Update metadata for a single asset
+    func updateAsset(assetId: String, update: UpdateAssetDto) async throws -> AssetResponseDto {
+        let body = try JSONEncoder().encode(update)
+        return try await requestJSON(method: "PUT", path: "assets/\(assetId)", body: body)
+    }
+
+    /// Error indicating asset not found (404)
+    struct AssetNotFoundError: Error {
+        let assetId: String
+    }
+
+    /// Update metadata for a single asset, returning nil if asset not found (404)
+    func updateAssetIfExists(assetId: String, update: UpdateAssetDto) async throws -> AssetResponseDto? {
+        do {
+            return try await updateAsset(assetId: assetId, update: update)
+        } catch let error as NSError where error.code == 404 {
+            return nil
+        }
     }
 
     func uploadAsset(
@@ -3047,7 +3404,7 @@ private func exportResourceToOutputs(
             fileCreatedAt: createdAt,
             fileModifiedAt: modifiedAt,
             durationSeconds: duration,
-            isFavorite: nil,
+            isFavorite: asset.isFavorite,
             livePhotoVideoId: livePhotoVideoId,
             metadata: meta,
             awaitResult: awaitImmichAssetId,
@@ -3129,7 +3486,7 @@ private func exportEditedImageToOutputs(
             fileCreatedAt: createdAt,
             fileModifiedAt: modifiedAt,
             durationSeconds: nil,
-            isFavorite: nil,
+            isFavorite: asset.isFavorite,
             livePhotoVideoId: nil,
             metadata: meta,
             awaitResult: false,
