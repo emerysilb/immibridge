@@ -125,6 +125,8 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published var immichSyncAlbums: Bool = false
     @Published var immichUpdateChangedAssets: Bool = false
     @Published var immichSyncMetadata: Bool = true
+    /// If true, overwrite existing Immich metadata; if false (default), only add missing metadata
+    @Published var immichMetadataOverwrite: Bool = false
 
     @Published private(set) var photosIsConnected: Bool = false
     @Published private(set) var photosConnectionText: String = "Checking…"
@@ -609,7 +611,8 @@ final class PhotoBackupViewModel: ObservableObject {
                     syncAlbums: immichSyncAlbums,
                     updateChangedAssets: immichUpdateChangedAssets,
                     syncMetadata: immichSyncMetadata || metadataSyncOnlyMode,
-                    metadataSyncOnly: metadataSyncOnlyMode
+                    metadataSyncOnly: metadataSyncOnlyMode,
+                    metadataOverwrite: immichMetadataOverwrite
                 )
             } else {
                 immichUpload = nil
@@ -1213,6 +1216,14 @@ final class PhotoBackupViewModel: ObservableObject {
             isPaused = true
             statusText = "Paused at \(at)/\(total)"
             appendLog("Paused at \(at)/\(total)")
+        case .metadataSyncing(let index, let total, let synced, let skipped, let notInImmich):
+            progressTotal = Double(total)
+            progressValue = Double(index)
+            statusText = "Metadata sync: \(index)/\(total) - \(synced) updated, \(skipped) unchanged"
+            // Log periodically to avoid flooding
+            if index <= 10 || index == total || (index % 500 == 0) {
+                appendLog("Metadata: \(index)/\(total) (synced: \(synced), skipped: \(skipped), not in Immich: \(notInImmich))")
+            }
         case .fileScanning:
             statusText = "Scanning files…"
             appendLog("Files: scanning…")

@@ -598,6 +598,11 @@ private extension ContentView {
                     .toggleStyle(.switch)
                     .disabled(model.isRunning)
 
+                Toggle("Overwrite existing metadata in Immich", isOn: $model.immichMetadataOverwrite)
+                    .toggleStyle(.switch)
+                    .disabled(model.isRunning)
+                    .help("When OFF (default): only add missing metadata (location, favorites). When ON: overwrite all metadata with Apple Photos values.")
+
                 Divider()
                     .overlay(DesignSystem.Colors.separator.opacity(0.6))
 

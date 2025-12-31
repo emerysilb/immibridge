@@ -243,6 +243,8 @@ public struct ImmichUploadOptions: Sendable {
     public var syncMetadata: Bool
     /// Run metadata sync only (skip upload phase)
     public var metadataSyncOnly: Bool
+    /// If true, overwrite existing metadata in Immich; if false (default), only add missing metadata
+    public var metadataOverwrite: Bool
 
     public init(
         serverURL: URL,
@@ -258,7 +260,8 @@ public struct ImmichUploadOptions: Sendable {
         syncAlbums: Bool = false,
         updateChangedAssets: Bool = false,
         syncMetadata: Bool = true,
-        metadataSyncOnly: Bool = false
+        metadataSyncOnly: Bool = false,
+        metadataOverwrite: Bool = false
     ) {
         self.serverURL = serverURL
         self.apiKey = apiKey
@@ -274,6 +277,7 @@ public struct ImmichUploadOptions: Sendable {
         self.updateChangedAssets = updateChangedAssets
         self.syncMetadata = syncMetadata
         self.metadataSyncOnly = metadataSyncOnly
+        self.metadataOverwrite = metadataOverwrite
     }
 }
 
@@ -401,6 +405,8 @@ public enum PhotoBackupProgress: Sendable {
     case immichExistingCheck(checked: Int, total: Int)
     /// Reports that the backup was paused
     case paused(at: Int, total: Int)
+    /// Reports progress of metadata sync phase
+    case metadataSyncing(index: Int, total: Int, synced: Int, skipped: Int, notInImmich: Int)
     // File backups (iCloud Drive / custom folders)
     case fileScanning
     case fileWillCopy(totalFiles: Int)
@@ -1725,7 +1731,13 @@ public final class PhotoBackupExporter {
         } // end if !skipExportPhase
 
         // MARK: - Metadata Sync Phase
-        if !shouldCancel(),
+        // For metadata sync, stop on both paused AND cancelled (metadata sync doesn't need resume support)
+        let shouldStopMetadataSync: @Sendable () -> Bool = {
+            let state = runState()
+            return state == .cancelled || state == .paused
+        }
+
+        if !shouldStopMetadataSync(),
            let immichUpload = options.immichUpload,
            immichUpload.syncMetadata || immichUpload.metadataSyncOnly,
            let immichClient,
@@ -1737,9 +1749,20 @@ public final class PhotoBackupExporter {
             var metadataSkipped = 0
             var metadataErrors = 0
             var metadataRecovered = 0
+            var metadataNotInImmich = 0
+            let metadataTotal = filtered.count
 
-            for asset in filtered {
-                if shouldCancel() { break }
+            for (metadataIndex, asset) in filtered.enumerated() {
+                if shouldStopMetadataSync() { break }
+
+                // Report progress
+                progress(.metadataSyncing(
+                    index: metadataIndex + 1,
+                    total: metadataTotal,
+                    synced: metadataSynced,
+                    skipped: metadataSkipped,
+                    notInImmich: metadataNotInImmich
+                ))
 
                 let currentMetadata = extractMetadata(from: asset)
                 let currentSignature = currentMetadata.signature()
@@ -1771,31 +1794,72 @@ public final class PhotoBackupExporter {
 
                 guard let mapping = mapping else {
                     // No mapping = asset not in Immich, skip
+                    metadataNotInImmich += 1
                     continue
                 }
 
-                // Check if metadata has changed
+                // Check cancellation after API calls
+                if shouldStopMetadataSync() { break }
+
+                // Check if metadata has changed (based on local signature)
                 if currentSignature == mapping.lastSyncedSignature {
                     metadataSkipped += 1
                     continue
                 }
 
-                // Build update DTO
-                var update = ImmichClient.UpdateAssetDto()
-
-                // Location
-                if let lat = currentMetadata.latitude, let lon = currentMetadata.longitude {
-                    update.latitude = lat
-                    update.longitude = lon
+                // Fetch existing Immich asset metadata (unless overwrite mode)
+                let existingAsset: ImmichClient.AssetResponseDto?
+                if immichUpload.metadataOverwrite {
+                    existingAsset = nil  // Skip fetch, will overwrite everything
+                } else {
+                    do {
+                        existingAsset = try runSync { try await immichClient.getAssetIfExists(assetId: mapping.immichAssetId) }
+                        if shouldStopMetadataSync() { break }
+                    } catch {
+                        // If we can't fetch, skip this asset
+                        metadataErrors += 1
+                        progressWrapped(.message("ERROR Metadata: could not fetch \(asset.localIdentifier): \(error)"))
+                        continue
+                    }
                 }
 
-                // Favorites and hidden status
-                update.isFavorite = currentMetadata.isFavorite
-                update.isArchived = currentMetadata.isHidden
+                // Build update DTO - only include fields missing in Immich (or all if overwrite mode)
+                var update = ImmichClient.UpdateAssetDto()
+                let overwrite = immichUpload.metadataOverwrite
 
-                // Creation date
+                // Location - only add if Immich doesn't have it (or overwrite enabled)
+                if let lat = currentMetadata.latitude, let lon = currentMetadata.longitude {
+                    let immichHasLocation = existingAsset?.effectiveLatitude != nil && existingAsset?.effectiveLongitude != nil
+                    if overwrite || !immichHasLocation {
+                        update.latitude = lat
+                        update.longitude = lon
+                    }
+                }
+
+                // Favorites - only update if different and (overwrite or Immich is false/nil)
+                let immichIsFavorite = existingAsset?.isFavorite ?? false
+                if currentMetadata.isFavorite != immichIsFavorite {
+                    if overwrite || !immichIsFavorite {
+                        // In additive mode: only set to true, never unset
+                        // In overwrite mode: sync the actual value
+                        update.isFavorite = overwrite ? currentMetadata.isFavorite : (currentMetadata.isFavorite ? true : nil)
+                    }
+                }
+
+                // Hidden/Archived - only update if different and (overwrite or Immich is false/nil)
+                let immichIsArchived = existingAsset?.isArchived ?? false
+                if currentMetadata.isHidden != immichIsArchived {
+                    if overwrite || !immichIsArchived {
+                        update.isArchived = overwrite ? currentMetadata.isHidden : (currentMetadata.isHidden ? true : nil)
+                    }
+                }
+
+                // Creation date - only add if Immich doesn't have it (or overwrite enabled)
                 if let creation = currentMetadata.creationDate {
-                    update.dateTimeOriginal = iso8601(creation)
+                    let immichHasDate = existingAsset?.effectiveDateTimeOriginal != nil
+                    if overwrite || !immichHasDate {
+                        update.dateTimeOriginal = iso8601(creation)
+                    }
                 }
 
                 // Skip if no changes to sync
@@ -1803,6 +1867,8 @@ public final class PhotoBackupExporter {
                     metadataSkipped += 1
                     continue
                 }
+
+                if shouldStopMetadataSync() { break }
 
                 do {
                     _ = try runSync { try await immichClient.updateAssetIfExists(assetId: mapping.immichAssetId, update: update) }
@@ -1822,6 +1888,8 @@ public final class PhotoBackupExporter {
                     metadataErrors += 1
                     progressWrapped(.message("ERROR Metadata: sync failed for \(asset.localIdentifier): \(error)"))
                 }
+
+                if shouldStopMetadataSync() { break }
             }
 
             var summaryParts: [String] = []
@@ -2454,11 +2522,41 @@ final class ImmichClient {
         }
     }
 
-    /// Response from PUT /assets/{id}
+    /// Response from GET/PUT /assets/{id}
     struct AssetResponseDto: Decodable {
         let id: String
         let isFavorite: Bool?
         let isArchived: Bool?
+        let latitude: Double?
+        let longitude: Double?
+        let dateTimeOriginal: String?
+
+        /// Nested exifInfo for location data (Immich sometimes returns location in exifInfo)
+        struct ExifInfo: Decodable {
+            let latitude: Double?
+            let longitude: Double?
+            let dateTimeOriginal: String?
+        }
+        let exifInfo: ExifInfo?
+
+        /// Get latitude from either top-level or exifInfo
+        var effectiveLatitude: Double? { latitude ?? exifInfo?.latitude }
+        var effectiveLongitude: Double? { longitude ?? exifInfo?.longitude }
+        var effectiveDateTimeOriginal: String? { dateTimeOriginal ?? exifInfo?.dateTimeOriginal }
+    }
+
+    /// Fetch asset details from Immich
+    func getAsset(assetId: String) async throws -> AssetResponseDto {
+        return try await requestJSON(method: "GET", path: "assets/\(assetId)", body: nil)
+    }
+
+    /// Fetch asset details, returning nil if not found (404)
+    func getAssetIfExists(assetId: String) async throws -> AssetResponseDto? {
+        do {
+            return try await getAsset(assetId: assetId)
+        } catch let error as NSError where error.code == 404 {
+            return nil
+        }
     }
 
     /// Update metadata for a single asset

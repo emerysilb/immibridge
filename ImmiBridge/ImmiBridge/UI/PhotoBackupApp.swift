@@ -11,6 +11,13 @@ struct PhotoBackupApp: App {
                 .environmentObject(appDelegate.scheduler)
         }
         .windowStyle(.hiddenTitleBar)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates...") {
+                    appDelegate.checkForUpdates()
+                }
+            }
+        }
     }
 }
 

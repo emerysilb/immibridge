@@ -30,6 +30,7 @@ fi
 VERSION="${VERSION:-0.1.0}"
 DMG_ARM64_PATH="$ROOT_DIR/build/ImmiBridge-${VERSION}-arm64.dmg"
 DMG_X86_64_PATH="$ROOT_DIR/build/ImmiBridge-${VERSION}-x86_64.dmg"
+SPARKLE_TOOLS_DIR="${SPARKLE_TOOLS_DIR:-$ROOT_DIR/tools/sparkle/bin}"
 
 sync_version_metadata() {
     local plist_path="$ROOT_DIR/ImmiBridge/ImmiBridge/UI/Info.plist"
@@ -38,6 +39,39 @@ sync_version_metadata() {
     echo "==> Syncing app version metadata to v${VERSION}..."
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$plist_path"
     perl -pi -e "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = ${VERSION};/g" "$pbxproj_path"
+
+    if [[ -n "${SPARKLE_FEED_URL:-}" ]]; then
+        /usr/libexec/PlistBuddy -c "Set :SUFeedURL ${SPARKLE_FEED_URL}" "$plist_path"
+    else
+        echo "Warning: SPARKLE_FEED_URL not set; Sparkle updates will be disabled."
+    fi
+
+    if [[ -n "${SPARKLE_PUBLIC_KEY:-}" ]]; then
+        /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey ${SPARKLE_PUBLIC_KEY}" "$plist_path"
+    else
+        echo "Warning: SPARKLE_PUBLIC_KEY not set; Sparkle updates will be disabled."
+    fi
+}
+
+generate_appcast() {
+    if [[ -z "${SPARKLE_PRIVATE_KEY:-}" || -z "${GITHUB_REPO:-}" ]]; then
+        echo "Skipping appcast: SPARKLE_PRIVATE_KEY and GITHUB_REPO are required."
+        return
+    fi
+
+    if [[ ! -x "$SPARKLE_TOOLS_DIR/generate_appcast" ]]; then
+        echo "Skipping appcast: Sparkle tools not found at $SPARKLE_TOOLS_DIR."
+        return
+    fi
+
+    local assets_dir="$ROOT_DIR/build/appcast-assets"
+    rm -rf "$assets_dir"
+    mkdir -p "$assets_dir"
+    cp "$DMG_ARM64_PATH" "$DMG_X86_64_PATH" "$assets_dir/"
+
+    echo "==> Generating Sparkle appcast..."
+    TAG="v${VERSION}" ASSETS_DIR="$assets_dir" SPARKLE_TOOLS_DIR="$SPARKLE_TOOLS_DIR" \
+        "$ROOT_DIR/scripts/generate_appcast.sh"
 }
 
 build_and_notarize() {
@@ -101,6 +135,7 @@ build_and_notarize() {
 sync_version_metadata
 build_and_notarize "arm64"
 build_and_notarize "x86_64"
+generate_appcast
 
 echo ""
 echo "================================================"

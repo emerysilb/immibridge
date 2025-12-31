@@ -1,4 +1,5 @@
 import AppKit
+import Sparkle
 import SwiftUI
 import UserNotifications
 
@@ -6,6 +7,7 @@ import UserNotifications
 class AppDelegate: NSObject, NSApplicationDelegate {
     let model = PhotoBackupViewModel()
     let scheduler = BackupScheduler()
+    private let updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
     private var statusItem: NSStatusItem?
     private let statusMenu = NSMenu()
@@ -58,6 +60,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             title: "Open Main Window",
             action: #selector(openMainWindow),
             keyEquivalent: "o"
+        ))
+        statusMenu.addItem(NSMenuItem(
+            title: "Check for Updates...",
+            action: #selector(checkForUpdates),
+            keyEquivalent: "u"
         ))
 
         if model.isRunning {
@@ -169,6 +176,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quitApp() {
         NSApp.terminate(nil)
+    }
+
+    @objc func checkForUpdates() {
+        updaterController.checkForUpdates(nil)
     }
 
     deinit {

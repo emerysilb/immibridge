@@ -55,11 +55,16 @@ test_export/
 !.env.example
 *.pem
 *.key
+/.sparkle_private_key.pem
 
 # Distribution
 *.app
 *.dmg
 *.zip
+
+# Sparkle tools (binary bundles)
+/tools/sparkle/
+/tools/Sparkle-for-Swift-Package-Manager.zip
 
 # Claude Code
 .claude/
