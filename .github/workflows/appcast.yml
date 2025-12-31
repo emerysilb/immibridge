@@ -3,7 +3,7 @@ name: Update Sparkle Appcast
 on:
   push:
     branches:
-      - main
+      - "**"
 
 permissions:
   contents: write
