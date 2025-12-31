@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   update-appcast:
+    environment: Runner
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -34,19 +35,10 @@ jobs:
             --dir /tmp/immi-assets \
             --pattern "*.dmg"
 
-      - name: Write Sparkle private key
-        env:
-          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-        run: |
-          if [[ -z "${SPARKLE_PRIVATE_KEY}" ]]; then
-            echo "Missing SPARKLE_PRIVATE_KEY secret."
-            exit 1
-          fi
-          printf "%s" "${SPARKLE_PRIVATE_KEY}" > /tmp/sparkle_private_key.pem
-
       - name: Generate appcast
         env:
-          SPARKLE_PRIVATE_KEY: /tmp/sparkle_private_key.pem
+          SPARKLE_PRIVATE_KEY: "-"
+          SPARKLE_PRIVATE_KEY_CONTENT: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           GITHUB_REPO: ${{ github.repository }}
           TAG: ${{ steps.release.outputs.tag }}
           ASSETS_DIR: /tmp/immi-assets
