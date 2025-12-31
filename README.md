@@ -29,6 +29,8 @@ Back up your Apple Photos library to a folder organized by capture date, or dire
 - Scheduled automatic backups
 - Menu bar integration
 - iCloud photo download with progress tracking
+- Metadata-only sync (update metadata without re-uploading files)
+- Automatic updates via Sparkle
 
 ## Installation
 
