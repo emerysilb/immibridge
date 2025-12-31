@@ -24,7 +24,7 @@ fi
 mkdir -p "$(dirname "$APPCAST_PATH")"
 
 "$SPARKLE_TOOLS_DIR/generate_appcast" \
-    --ed25519-private-key "$SPARKLE_PRIVATE_KEY" \
+    --ed-key-file "$SPARKLE_PRIVATE_KEY" \
     --link "https://github.com/${GITHUB_REPO}/releases" \
     --download-url-prefix "https://github.com/${GITHUB_REPO}/releases/download/${TAG}/" \
     --output "$APPCAST_PATH" \
