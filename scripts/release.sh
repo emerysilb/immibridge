@@ -35,6 +35,38 @@ SPARKLE_TOOLS_DIR="${SPARKLE_TOOLS_DIR:-$ROOT_DIR/tools/sparkle/bin}"
 # Set to "universal" for single universal binary, "separate" for arch-specific DMGs
 BUILD_MODE="${BUILD_MODE:-universal}"
 
+# Create DMG from an app bundle using mount/copy approach
+# This works around "Operation not permitted" errors with notarized apps
+create_dmg() {
+    local app_path="$1"
+    local dmg_path="$2"
+    local volume_name="$3"
+    local temp_dmg="${dmg_path%.dmg}-temp.dmg"
+    local mount_point="/tmp/immibridge-dmg-$$"
+
+    rm -f "$dmg_path" "$temp_dmg"
+
+    # Create empty writable DMG (150MB should be plenty)
+    hdiutil create -size 150m -fs HFS+ -volname "$volume_name" "$temp_dmg"
+
+    # Mount it
+    mkdir -p "$mount_point"
+    hdiutil attach "$temp_dmg" -mountpoint "$mount_point"
+
+    # Copy app using ditto (preserves everything properly)
+    ditto "$app_path" "$mount_point/$(basename "$app_path")"
+
+    # Unmount
+    hdiutil detach "$mount_point"
+    rmdir "$mount_point" 2>/dev/null || true
+
+    # Convert to compressed read-only DMG
+    hdiutil convert "$temp_dmg" -format UDZO -o "$dmg_path"
+
+    # Clean up temp DMG
+    rm -f "$temp_dmg"
+}
+
 sync_version_metadata() {
     local plist_path="$ROOT_DIR/ImmiBridge/ImmiBridge/UI/Info.plist"
     local pbxproj_path="$ROOT_DIR/ImmiBridge/ImmiBridge.xcodeproj/project.pbxproj"
@@ -126,15 +158,7 @@ build_and_notarize() {
 
     echo ""
     echo "==> Creating DMG (${arch})..."
-    rm -f "$dmg_path"
-    # Use staging dir and unique volume name to avoid permission issues with notarized apps
-    local staging_dir="$ROOT_DIR/build/dmg-staging-${arch}"
-    rm -rf "$staging_dir"
-    mkdir -p "$staging_dir"
-    cp -R "$app_dir" "$staging_dir/"
-    xattr -cr "$staging_dir"
-    hdiutil create -volname "ImmiBridge-${arch}" -srcfolder "$staging_dir" -ov -format UDZO "$dmg_path"
-    rm -rf "$staging_dir"
+    create_dmg "$app_dir" "$dmg_path" "ImmiBridge"
 
     echo ""
     echo "==> Notarizing DMG (${arch})..."
@@ -199,15 +223,7 @@ build_universal_and_notarize() {
 
     echo ""
     echo "==> Creating DMG (universal)..."
-    rm -f "$dmg_path"
-    # Use staging dir and unique volume name to avoid permission issues with notarized apps
-    local staging_dir="$ROOT_DIR/build/dmg-staging"
-    rm -rf "$staging_dir"
-    mkdir -p "$staging_dir"
-    cp -R "$app_dir" "$staging_dir/"
-    xattr -cr "$staging_dir"
-    hdiutil create -volname "ImmiBridge-Install" -srcfolder "$staging_dir" -ov -format UDZO "$dmg_path"
-    rm -rf "$staging_dir"
+    create_dmg "$app_dir" "$dmg_path" "ImmiBridge"
 
     echo ""
     echo "==> Notarizing DMG (universal)..."

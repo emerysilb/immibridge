@@ -48,7 +48,44 @@ cp -R "$DERIVED_DATA_PATH/Build/Products/Release/ImmiBridge.app" "$APP_DIR"
 # Re-sign if a custom identity is provided (for notarization)
 if [[ "$CODESIGN_IDENTITY" != "-" ]]; then
     echo "Re-signing with identity: $CODESIGN_IDENTITY"
-    codesign --force --deep --options runtime \
+
+    # Sign all Sparkle framework components from innermost to outermost
+    SPARKLE_DIR="$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/B"
+
+    if [[ -d "$SPARKLE_DIR" ]]; then
+        # 1. Sign XPC services
+        for xpc in "$SPARKLE_DIR/XPCServices/"*.xpc; do
+            if [[ -d "$xpc" ]]; then
+                echo "  Signing XPC service: $(basename "$xpc")"
+                codesign --force --options runtime --timestamp \
+                    --sign "$CODESIGN_IDENTITY" "$xpc"
+            fi
+        done
+
+        # 2. Sign Updater.app
+        if [[ -d "$SPARKLE_DIR/Updater.app" ]]; then
+            echo "  Signing nested app: Updater.app"
+            codesign --force --options runtime --timestamp \
+                --sign "$CODESIGN_IDENTITY" "$SPARKLE_DIR/Updater.app"
+        fi
+
+        # 3. Sign Autoupdate executable
+        if [[ -f "$SPARKLE_DIR/Autoupdate" ]]; then
+            echo "  Signing executable: Autoupdate"
+            codesign --force --options runtime --timestamp \
+                --sign "$CODESIGN_IDENTITY" "$SPARKLE_DIR/Autoupdate"
+        fi
+    fi
+
+    # 4. Sign the Sparkle framework itself
+    if [[ -d "$APP_DIR/Contents/Frameworks/Sparkle.framework" ]]; then
+        echo "  Signing framework: Sparkle.framework"
+        codesign --force --options runtime --timestamp \
+            --sign "$CODESIGN_IDENTITY" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
+    fi
+
+    # 5. Sign the main app
+    codesign --force --options runtime --timestamp \
         --entitlements "$PROJECT_DIR/ImmiBridge/ImmiBridge.entitlements" \
         --sign "$CODESIGN_IDENTITY" "$APP_DIR"
 fi

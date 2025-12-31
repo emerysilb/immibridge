@@ -5,13 +5,22 @@
         <description>Appcast for ImmiBridge updates.</description>
         <language>en</language>
         <item>
+            <title>1.0.8</title>
+            <pubDate>Wed, 31 Dec 2025 13:47:00 -0800</pubDate>
+            <link>https://github.com/emerysilb/immibridge/releases</link>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>1.0.8</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/emerysilb/immibridge/releases/download/v1.0.8/ImmiBridge-1.0.8.dmg" length="6042445" type="application/octet-stream" sparkle:edSignature="D2tktl/1BJHlPMhNb4K8QGhqGlYCbffw+pWzZyrkhj4FwYaJU1Aa+LCnZ6jzkPI3TgyDm4pfNkvSt0xG4INfAw=="/>
+        </item>
+        <item>
             <title>1.0.7</title>
             <pubDate>Wed, 31 Dec 2025 11:37:34 -0800</pubDate>
             <link>https://github.com/emerysilb/immibridge/releases</link>
             <sparkle:version>2</sparkle:version>
-            <sparkle:shortVersionString>1.0.7</sparkle:shortVersionString>
+            <sparkle:shortVersionString>1.0.8</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/emerysilb/immibridge/releases/download/v1.0.7/ImmiBridge-1.0.7.dmg" length="6204580" type="application/octet-stream" sparkle:edSignature="Jh6zdLjuwFsynDcPnsBf2auyLOLmlgbsAk6WgTE4fCZhvLjsQfGvaKDHntOK3twY60SoPFSfBjzb/vf4/KthCA=="/>
+            <enclosure url="https://github.com/emerysilb/immibridge/releases/download/v1.0.8/ImmiBridge-1.0.8.dmg" length="6048664" type="application/octet-stream" sparkle:edSignature="9XORAlAcQ52NHEVCqHGExnpDDH+mcgVITs6UjxG7Axm0RrgJEl09UfYliijVelXeb5n6lr2gEe8EbDPyLhWACA=="/>
         </item>
         <item>
             <title>1.0.6</title>
