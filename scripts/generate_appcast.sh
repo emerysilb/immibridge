@@ -26,6 +26,10 @@ mkdir -p "$(dirname "$APPCAST_PATH")"
 
 if [[ "$SPARKLE_PRIVATE_KEY" == "-" ]]; then
     SPARKLE_PRIVATE_KEY_CONTENT="$(printf "%s" "$SPARKLE_PRIVATE_KEY_CONTENT" | tr -d ' \r\n\t')"
+    if [[ "$SPARKLE_PRIVATE_KEY_CONTENT" == \"*\" ]]; then
+        SPARKLE_PRIVATE_KEY_CONTENT="${SPARKLE_PRIVATE_KEY_CONTENT#\"}"
+        SPARKLE_PRIVATE_KEY_CONTENT="${SPARKLE_PRIVATE_KEY_CONTENT%\"}"
+    fi
     if [[ -z "$SPARKLE_PRIVATE_KEY_CONTENT" ]]; then
         echo "Set SPARKLE_PRIVATE_KEY_CONTENT when using SPARKLE_PRIVATE_KEY='-'."
         exit 1
@@ -34,7 +38,7 @@ if [[ "$SPARKLE_PRIVATE_KEY" == "-" ]]; then
         echo "Sparkle private key content looks too short (${#SPARKLE_PRIVATE_KEY_CONTENT} chars)."
         exit 1
     fi
-    printf "%s" "$SPARKLE_PRIVATE_KEY_CONTENT" | \
+    printf "%s\n" "$SPARKLE_PRIVATE_KEY_CONTENT" | \
         "$SPARKLE_TOOLS_DIR/generate_appcast" \
             --ed-key-file - \
             --link "https://github.com/${GITHUB_REPO}/releases" \
