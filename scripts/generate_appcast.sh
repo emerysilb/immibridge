@@ -48,7 +48,6 @@ except Exception:
 if len(decoded) != 32:
     print(f"Sparkle private key decoded length {len(decoded)} (expected 32).", file=sys.stderr)
     raise SystemExit(3)
-print("Sparkle private key decoded length 32.", file=sys.stderr)
 print(raw)
 PY
 )"

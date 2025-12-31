@@ -3,7 +3,7 @@ name: Update Sparkle Appcast
 on:
   push:
     branches:
-      - "**"
+      - main
 
 permissions:
   contents: write
@@ -48,7 +48,6 @@ jobs:
           curl -L -o /tmp/sparkle.zip \
             https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/Sparkle-for-Swift-Package-Manager.zip
           unzip -q /tmp/sparkle.zip -d /tmp/sparkle
-          echo "Sparkle key length: ${#SPARKLE_PRIVATE_KEY_CONTENT}"
           scripts/generate_appcast.sh
 
       - name: Commit appcast
