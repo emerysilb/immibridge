@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   update-appcast:
+    environment: Runner
     runs-on: macos-latest
     steps:
       - name: Checkout
