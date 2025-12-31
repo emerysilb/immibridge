@@ -48,6 +48,7 @@ except Exception:
 if len(decoded) != 32:
     print(f"Sparkle private key decoded length {len(decoded)} (expected 32).", file=sys.stderr)
     raise SystemExit(3)
+print("Sparkle private key decoded length 32.", file=sys.stderr)
 print(raw)
 PY
 )"
@@ -55,15 +56,13 @@ PY
         echo "Sparkle private key content is empty after normalization."
         exit 1
     fi
-    tmp_key="$(mktemp /tmp/sparkle_key.XXXXXX)"
-    printf "%s\n" "$cleaned_key" > "$tmp_key"
-    "$SPARKLE_TOOLS_DIR/generate_appcast" \
-        --ed-key-file "$tmp_key" \
-        --link "https://github.com/${GITHUB_REPO}/releases" \
-        --download-url-prefix "https://github.com/${GITHUB_REPO}/releases/download/${TAG}/" \
-        -o "$APPCAST_PATH" \
-        "$ASSETS_DIR"
-    rm -f "$tmp_key"
+    printf "%s\n" "$cleaned_key" | \
+        "$SPARKLE_TOOLS_DIR/generate_appcast" \
+            --ed-key-file - \
+            --link "https://github.com/${GITHUB_REPO}/releases" \
+            --download-url-prefix "https://github.com/${GITHUB_REPO}/releases/download/${TAG}/" \
+            -o "$APPCAST_PATH" \
+            "$ASSETS_DIR"
 else
     if [[ ! -s "$SPARKLE_PRIVATE_KEY" ]]; then
         echo "Sparkle private key file missing or empty: $SPARKLE_PRIVATE_KEY"
