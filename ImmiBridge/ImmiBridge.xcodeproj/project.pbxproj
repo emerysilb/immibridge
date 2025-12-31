@@ -459,17 +459,13 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readwrite;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2025 Emery Silberman. All rights reserved.";
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "ImmiBridge needs local network access to connect to your Immich server.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "ImmiBridge needs access to export your Photos library for backup.";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "ImmiBridge needs access to export your Photos library for backup.";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ImmiBridge/UI/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0.4;
+				MARKETING_VERSION = 1.0.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.emerysilb.ImmiBridge;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -496,17 +492,13 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readwrite;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2025 Emery Silberman. All rights reserved.";
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "ImmiBridge needs local network access to connect to your Immich server.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "ImmiBridge needs access to export your Photos library for backup.";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "ImmiBridge needs access to export your Photos library for backup.";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ImmiBridge/UI/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0.4;
+				MARKETING_VERSION = 1.0.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.emerysilb.ImmiBridge;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -527,7 +519,7 @@
 				DEVELOPMENT_TEAM = UDCDSLM88G;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 1.0.4;
+				MARKETING_VERSION = 1.0.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.emerysilb.ImmiBridgeTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -548,7 +540,7 @@
 				DEVELOPMENT_TEAM = UDCDSLM88G;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 1.0.4;
+				MARKETING_VERSION = 1.0.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.emerysilb.ImmiBridgeTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -567,7 +559,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = UDCDSLM88G;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.0.4;
+				MARKETING_VERSION = 1.0.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.emerysilb.ImmiBridgeUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -586,7 +578,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = UDCDSLM88G;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.0.4;
+				MARKETING_VERSION = 1.0.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.emerysilb.ImmiBridgeUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
