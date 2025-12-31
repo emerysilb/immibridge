@@ -127,7 +127,14 @@ build_and_notarize() {
     echo ""
     echo "==> Creating DMG (${arch})..."
     rm -f "$dmg_path"
-    hdiutil create -volname "ImmiBridge (${arch})" -srcfolder "$app_dir" -ov -format UDZO "$dmg_path"
+    # Use staging dir and unique volume name to avoid permission issues with notarized apps
+    local staging_dir="$ROOT_DIR/build/dmg-staging-${arch}"
+    rm -rf "$staging_dir"
+    mkdir -p "$staging_dir"
+    cp -R "$app_dir" "$staging_dir/"
+    xattr -cr "$staging_dir"
+    hdiutil create -volname "ImmiBridge-${arch}" -srcfolder "$staging_dir" -ov -format UDZO "$dmg_path"
+    rm -rf "$staging_dir"
 
     echo ""
     echo "==> Notarizing DMG (${arch})..."
@@ -193,7 +200,14 @@ build_universal_and_notarize() {
     echo ""
     echo "==> Creating DMG (universal)..."
     rm -f "$dmg_path"
-    hdiutil create -volname "ImmiBridge" -srcfolder "$app_dir" -ov -format UDZO "$dmg_path"
+    # Use staging dir and unique volume name to avoid permission issues with notarized apps
+    local staging_dir="$ROOT_DIR/build/dmg-staging"
+    rm -rf "$staging_dir"
+    mkdir -p "$staging_dir"
+    cp -R "$app_dir" "$staging_dir/"
+    xattr -cr "$staging_dir"
+    hdiutil create -volname "ImmiBridge-Install" -srcfolder "$staging_dir" -ov -format UDZO "$dmg_path"
+    rm -rf "$staging_dir"
 
     echo ""
     echo "==> Notarizing DMG (universal)..."
