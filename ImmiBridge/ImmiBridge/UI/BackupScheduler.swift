@@ -156,6 +156,7 @@ final class BackupScheduler: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let defaults = UserDefaults.standard
     private weak var viewModel: PhotoBackupViewModel?
+    private var isLoadingSettings = false
 
     // MARK: - Initialization
 
@@ -223,6 +224,9 @@ final class BackupScheduler: ObservableObject {
     // MARK: - Private Methods
 
     private func loadSettings() {
+        isLoadingSettings = true
+        defer { isLoadingSettings = false }
+
         if let raw = defaults.string(forKey: "scheduleType"),
            let type = ScheduleType(rawValue: raw) {
             scheduleType = type
@@ -257,6 +261,7 @@ final class BackupScheduler: ObservableObject {
     }
 
     private func saveSettings() {
+        guard !isLoadingSettings else { return }
         defaults.set(scheduleType.rawValue, forKey: "scheduleType")
         defaults.set(intervalHours, forKey: "scheduleIntervalHours")
         defaults.set(scheduledHour, forKey: "scheduledTimeHour")
@@ -274,6 +279,7 @@ final class BackupScheduler: ObservableObject {
     }
 
     private func reschedule() {
+        guard !isLoadingSettings else { return }
         timer?.invalidate()
         timer = nil
 
