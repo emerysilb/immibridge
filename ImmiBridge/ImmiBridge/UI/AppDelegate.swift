@@ -24,6 +24,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
+        // Register for window close notifications to hide from dock when all windows close
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowDidClose),
+            name: NSWindow.willCloseNotification,
+            object: nil
+        )
+
         setupStatusItem()
     }
 
@@ -35,6 +43,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func handleWake() {
         // Notify scheduler to check for missed backups
         NotificationCenter.default.post(name: .systemDidWake, object: nil)
+    }
+
+    @objc private func windowDidClose(_ notification: Notification) {
+        // When a window closes, check if any visible non-panel windows remain
+        // If not, hide the app from the dock (accessory mode = menu bar only)
+        Task { @MainActor in
+            // Small delay to let the window finish closing
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+
+            let hasVisibleWindows = NSApp.windows.contains { window in
+                !window.isMiniaturized && window.isVisible && !(window is NSPanel)
+            }
+
+            if !hasVisibleWindows {
+                NSApp.setActivationPolicy(.accessory)
+            }
+        }
     }
 
     private func setupStatusItem() {
@@ -184,6 +209,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     deinit {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        NotificationCenter.default.removeObserver(self)
     }
 }
 
