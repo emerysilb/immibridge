@@ -32,17 +32,21 @@ if [[ "$SPARKLE_PRIVATE_KEY" == "-" ]]; then
     cleaned_key="$(python3 - <<'PY'
 import base64
 import os
+import sys
 
 raw = os.environ.get("SPARKLE_PRIVATE_KEY_CONTENT", "")
 raw = "".join(raw.split())
 raw = raw.strip("\"'")
 if not raw:
+    print("Sparkle private key content is empty after normalization.", file=sys.stderr)
     raise SystemExit(1)
 try:
     decoded = base64.b64decode(raw, validate=True)
 except Exception:
+    print("Sparkle private key content is not valid base64.", file=sys.stderr)
     raise SystemExit(2)
 if len(decoded) != 32:
+    print(f"Sparkle private key decoded length {len(decoded)} (expected 32).", file=sys.stderr)
     raise SystemExit(3)
 print(raw)
 PY
