@@ -687,7 +687,7 @@ final class PhotoBackupViewModel: ObservableObject {
             limit: limit,
             dryRun: dryRun,
             since: dateFilterEnabled ? Calendar.current.startOfDay(for: filterStartDate) : nil,
-            until: dateFilterEnabled ? Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: filterEndDate)) : nil,
+            until: dateFilterEnabled ? Calendar.current.date(byAdding: DateComponents(day: 1, second: -1), to: Calendar.current.startOfDay(for: filterEndDate)) : nil,
             albumScope: albumScope,
             libraryScope: libraryScope.coreValue,
             includeAdjustmentData: includeAdjustmentData,
