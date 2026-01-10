@@ -255,6 +255,8 @@ final class PhotoBackupViewModel: ObservableObject {
         if let ed = defaults.object(forKey: "filterEndDate") as? Date {
             filterEndDate = ed
         }
+        // Ensure start <= end after loading persisted values
+        ensureDateOrder()
 
         if let arr = defaults.array(forKey: "customFolderBookmarks") as? [Data] {
             customFolderBookmarks = arr
@@ -284,6 +286,15 @@ final class PhotoBackupViewModel: ObservableObject {
     func completeSetupWizard() {
         defaults.set(true, forKey: "hasCompletedSetupWizard")
         shouldShowSetupWizard = false
+    }
+
+    // Ensure start date is not after end date; swap if necessary
+    private func ensureDateOrder() {
+        if filterStartDate > filterEndDate {
+            let tmp = filterStartDate
+            filterStartDate = filterEndDate
+            filterEndDate = tmp
+        }
     }
 
     func refreshPhotosAuthorizationStatus(autoRequest: Bool = false) {
@@ -581,6 +592,8 @@ final class PhotoBackupViewModel: ObservableObject {
         defaults.set(immichSyncAlbums, forKey: "immichSyncAlbums")
         defaults.set(immichUpdateChangedAssets, forKey: "immichUpdateChangedAssets")
         // Persist date filter settings
+        // Ensure start <= end before persisting/using the values
+        ensureDateOrder()
         defaults.set(dateFilterEnabled, forKey: "dateFilterEnabled")
         defaults.set(filterStartDate, forKey: "filterStartDate")
         defaults.set(filterEndDate, forKey: "filterEndDate")
