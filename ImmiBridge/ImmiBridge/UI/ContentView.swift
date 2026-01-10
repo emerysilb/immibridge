@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var model: PhotoBackupViewModel
@@ -984,7 +985,7 @@ private extension ContentView {
 
         let panel = NSSavePanel()
         panel.nameFieldStringValue = defaultName
-        panel.allowedFileTypes = ["txt"]
+        panel.allowedContentTypes = [.plainText]
         if panel.runModal() == .OK, let url = panel.url {
             do {
                 try text.write(to: url, atomically: true, encoding: .utf8)
