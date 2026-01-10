@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var model: PhotoBackupViewModel
@@ -83,9 +85,17 @@ struct ContentView: View {
 
                     HStack(alignment: .top, spacing: 14) {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Log")
-                                .font(.system(.headline, design: .rounded))
-                                .foregroundStyle(DesignSystem.Colors.textSecondary)
+                            HStack {
+                                Text("Log")
+                                    .font(.system(.headline, design: .rounded))
+                                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+                                Spacer()
+                                Button("Download") {
+                                    saveLogs()
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(model.logLines.isEmpty)
+                            }
                             LogConsoleView(lines: model.logLines, isActive: isLogDrawerOpen)
                         }
 
@@ -358,6 +368,33 @@ private extension ContentView {
                             .disabled(model.isRunning || !model.photosIsConnected)
                         }
                     }
+                }
+                
+                HStack(spacing: 12) {
+                    Text("Filter:")
+                        .foregroundStyle(DesignSystem.Colors.textSecondary)
+                        .frame(width: 70, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("Enable Date Range", isOn: $model.dateFilterEnabled)
+                            .toggleStyle(.switch)
+                            .disabled(model.isRunning)
+
+                        HStack(spacing: 8) {
+                            DatePicker("From", selection: $model.filterStartDate, displayedComponents: .date)
+                                .labelsHidden()
+                                .accessibilityLabel("From")
+                                .disabled(!model.dateFilterEnabled || model.isRunning)
+                                .frame(maxWidth: 180)
+
+                            DatePicker("To", selection: $model.filterEndDate, displayedComponents: .date)
+                                .labelsHidden()
+                                .accessibilityLabel("To")
+                                .disabled(!model.dateFilterEnabled || model.isRunning)
+                                .frame(maxWidth: 180)
+                        }
+                    }
+                    .font(.system(.subheadline, design: .rounded))
                 }
 
                 HStack(spacing: 12) {
@@ -877,6 +914,14 @@ private extension ContentView {
                             .foregroundStyle(DesignSystem.Colors.textSecondary)
                     }
                     VStack(spacing: 2) {
+                        Text("\(model.replacedCount)")
+                            .font(.system(.title2, design: .rounded).bold())
+                            .foregroundStyle(DesignSystem.Colors.textSecondary)
+                        Text("Replaced")
+                            .font(.system(.caption2, design: .rounded))
+                            .foregroundStyle(DesignSystem.Colors.textSecondary)
+                    }
+                    VStack(spacing: 2) {
                         Button {
                             showErrorsSheet = true
                         } label: {
@@ -893,7 +938,7 @@ private extension ContentView {
                         .help("View errors and failed uploads")
                     }
                 }
-                .frame(width: 200, alignment: .center)
+                .frame(width: 220, alignment: .center)
 
                 HStack(spacing: 10) {
                     Button {
@@ -930,6 +975,24 @@ private extension ContentView {
             if Task.isCancelled { return }
             await MainActor.run {
                 model.maybeAutoTestImmich()
+            }
+        }
+    }
+
+    func saveLogs() {
+        let text = model.logLines.map { $0.text }.joined(separator: "\n")
+        let df = DateFormatter()
+        df.dateFormat = "yyyyMMdd-HHmmss"
+        let defaultName = "immibridge-log-\(df.string(from: Date())).txt"
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = defaultName
+        panel.allowedContentTypes = [.plainText]
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try text.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                // best-effort: ignore write errors
             }
         }
     }

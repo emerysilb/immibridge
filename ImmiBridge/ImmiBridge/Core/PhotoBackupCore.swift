@@ -43,11 +43,13 @@ public struct BackupSessionStats: Codable, Sendable {
     public var uploadedCount: Int
     public var skippedCount: Int
     public var errorCount: Int
+    public var replacedCount: Int
 
-    public init(uploadedCount: Int = 0, skippedCount: Int = 0, errorCount: Int = 0) {
+    public init(uploadedCount: Int = 0, skippedCount: Int = 0, errorCount: Int = 0, replacedCount: Int = 0) {
         self.uploadedCount = uploadedCount
         self.skippedCount = skippedCount
         self.errorCount = errorCount
+        self.replacedCount = replacedCount
     }
 }
 
@@ -338,6 +340,7 @@ public struct PhotoBackupOptions: Sendable {
     public var limit: Int?
     public var dryRun: Bool
     public var since: Date?
+    public var until: Date?
     public var albumScope: AlbumScope
     public var libraryScope: LibraryScope
     public var includeAdjustmentData: Bool
@@ -361,6 +364,7 @@ public struct PhotoBackupOptions: Sendable {
         limit: Int? = nil,
         dryRun: Bool = false,
         since: Date? = nil,
+        until: Date? = nil,
         albumScope: AlbumScope = .allPhotos,
         libraryScope: LibraryScope = .personalOnly,
         includeAdjustmentData: Bool = true,
@@ -383,6 +387,7 @@ public struct PhotoBackupOptions: Sendable {
         self.limit = limit
         self.dryRun = dryRun
         self.since = since
+        self.until = until
         self.albumScope = albumScope
         self.libraryScope = libraryScope
         self.includeAdjustmentData = includeAdjustmentData
@@ -796,8 +801,10 @@ public final class PhotoBackupExporter {
         progress(.scanning)
 
         func assetPassesFilters(_ asset: PHAsset) -> Bool {
+            let created = asset.creationDate
             if !options.includeHiddenPhotos && asset.isHidden { return false }
-            if let since = options.since, let created = asset.creationDate, created < since { return false }
+            if let since = options.since, let created = created, created < since { return false }
+            if let until = options.until, let created = created, created > until { return false }
             switch options.media {
             case .all:
                 break
@@ -1101,42 +1108,21 @@ public final class PhotoBackupExporter {
                 for asset in filtered {
                     if shouldCancel() { break }
 
+                    var outputs: [(label: String, id: String)] = []
+
                     if options.mode == .originals || options.mode == .both {
                         switch asset.mediaType {
                         case .image:
                             plannedStill += 1
-                            let stillExists = existing.contains(asset.localIdentifier)
-                            if stillExists {
-                                if immichUpload.updateChangedAssets {
-                                    wouldReplaceExisting += 1
-                                } else {
-                                    wouldSkipExisting += 1
-                                }
-                            }
-
+                            outputs.append((label: "still", id: asset.localIdentifier))
                             if asset.mediaSubtypes.contains(.photoLive) {
                                 plannedVideos += 1
-                                let pairedExists = existing.contains(asset.localIdentifier + ":pairedVideo")
-                                let videoExists = existing.contains(asset.localIdentifier + ":video")
-                                let liveVideoExists = pairedExists || videoExists
-                                if liveVideoExists {
-                                    if immichUpload.updateChangedAssets {
-                                        wouldReplaceExisting += 1
-                                    } else {
-                                        wouldSkipExisting += 1
-                                    }
-                                }
+                                outputs.append((label: "pairedVideo", id: asset.localIdentifier + ":pairedVideo"))
+                                outputs.append((label: "video", id: asset.localIdentifier + ":video"))
                             }
                         case .video:
                             plannedVideos += 1
-                            let id = asset.localIdentifier + ":video"
-                            if existing.contains(id) {
-                                if immichUpload.updateChangedAssets {
-                                    wouldReplaceExisting += 1
-                                } else {
-                                    wouldSkipExisting += 1
-                                }
-                            }
+                            outputs.append((label: "video", id: asset.localIdentifier + ":video"))
                         default:
                             break
                         }
@@ -1145,14 +1131,25 @@ public final class PhotoBackupExporter {
                     if options.mode == .edited || options.mode == .both {
                         if asset.mediaType == .image {
                             plannedEdited += 1
-                            let id = asset.localIdentifier + ":edited"
-                            if existing.contains(id) {
-                                if immichUpload.updateChangedAssets {
-                                    wouldReplaceExisting += 1
-                                } else {
-                                    wouldSkipExisting += 1
-                                }
+                            outputs.append((label: "edited", id: asset.localIdentifier + ":edited"))
+                        }
+                    }
+
+                    // Evaluate outputs and append per-output notes
+                    let resources = PHAssetResource.assetResources(for: asset)
+                    let filename = resources.first?.originalFilename ?? asset.localIdentifier
+                    for out in outputs {
+                        let exists = existing.contains(out.id)
+                        if exists {
+                            if immichUpload.updateChangedAssets {
+                                wouldReplaceExisting += 1
+                                notes.append("\(filename) (\(out.label)) — would replace")
+                            } else {
+                                wouldSkipExisting += 1
+                                notes.append("\(filename) (\(out.label)) — would skip (already exists)")
                             }
+                        } else {
+                            notes.append("\(filename) (\(out.label)) — would upload")
                         }
                     }
                 }
