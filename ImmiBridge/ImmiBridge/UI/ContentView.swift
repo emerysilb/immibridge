@@ -383,11 +383,13 @@ private extension ContentView {
                         HStack(spacing: 8) {
                             DatePicker("From", selection: $model.filterStartDate, displayedComponents: .date)
                                 .labelsHidden()
+                                .accessibilityLabel("From")
                                 .disabled(!model.dateFilterEnabled || model.isRunning)
                                 .frame(maxWidth: 180)
 
                             DatePicker("To", selection: $model.filterEndDate, displayedComponents: .date)
                                 .labelsHidden()
+                                .accessibilityLabel("To")
                                 .disabled(!model.dateFilterEnabled || model.isRunning)
                                 .frame(maxWidth: 180)
                         }
