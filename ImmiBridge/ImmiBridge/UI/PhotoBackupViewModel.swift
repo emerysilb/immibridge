@@ -115,6 +115,10 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published var limit: Int? = nil
     @Published var timeoutSeconds: Double = 300
 
+    @Published var dateFilterEnabled: Bool = false
+    @Published var filterStartDate: Date = Calendar.current.date(byAdding: .year, value: -1, to: Date()) ?? Date()
+    @Published var filterEndDate: Date = Date()
+
     @Published var immichServerURL: String = ""
     @Published var immichApiKey: String = ""
     @Published private(set) var immichDeviceId: String = ""
@@ -146,6 +150,7 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published private(set) var uploadedCount: Int = 0
     @Published private(set) var skippedCount: Int = 0
     @Published private(set) var errorCount: Int = 0
+    @Published private(set) var replacedCount: Int = 0
     @Published private(set) var failedUploadCount: Int = 0
     @Published private(set) var isExportingFailedUploads: Bool = false
     @Published private(set) var immichExistChecked: Int = 0
@@ -176,6 +181,7 @@ final class PhotoBackupViewModel: ObservableObject {
     private var didShowFirstThumbnail: Bool = false
     private var lastThumbnailRequestId: PHImageRequestID?
     private var skippedAssetIds: Set<String> = []  // Track asset-level skips (not file-level)
+    private var replacedAssetIds: Set<String> = [] // Track asset-level replacements to avoid double-counting
     private var countedImmichUploadErrorAssetIds: Set<String> = []
     private var currentFailedUploadsDir: URL? = nil
     private var logBuffer: [LogLine] = []
@@ -248,6 +254,17 @@ final class PhotoBackupViewModel: ObservableObject {
             filenameFormat = fmt
         }
 
+        // Date range filter persistence
+        dateFilterEnabled = defaults.bool(forKey: "dateFilterEnabled")
+        if let sd = defaults.object(forKey: "filterStartDate") as? Date {
+            filterStartDate = sd
+        }
+        if let ed = defaults.object(forKey: "filterEndDate") as? Date {
+            filterEndDate = ed
+        }
+        // Ensure start <= end after loading persisted values
+        ensureDateOrder()
+
         if let arr = defaults.array(forKey: "customFolderBookmarks") as? [Data] {
             customFolderBookmarks = arr
         }
@@ -284,6 +301,15 @@ final class PhotoBackupViewModel: ObservableObject {
     func completeSetupWizard() {
         defaults.set(true, forKey: "hasCompletedSetupWizard")
         shouldShowSetupWizard = false
+    }
+
+    // Ensure start date is not after end date; swap if necessary
+    private func ensureDateOrder() {
+        if filterStartDate > filterEndDate {
+            let tmp = filterStartDate
+            filterStartDate = filterEndDate
+            filterEndDate = tmp
+        }
     }
 
     func refreshPhotosAuthorizationStatus(autoRequest: Bool = false) {
@@ -545,11 +571,13 @@ final class PhotoBackupViewModel: ObservableObject {
             uploadedCount = session.stats.uploadedCount
             skippedCount = session.stats.skippedCount
             errorCount = session.stats.errorCount
+            replacedCount = session.stats.replacedCount
             skippedAssetIds = session.processedAssetIds  // Don't re-count assets from previous session
         } else {
             uploadedCount = 0
             skippedCount = 0
             errorCount = 0
+            replacedCount = 0
             skippedAssetIds = []
         }
         immichExistChecked = 0
@@ -579,6 +607,12 @@ final class PhotoBackupViewModel: ObservableObject {
         defaults.set(Array(selectedAlbumIds), forKey: "selectedAlbumIds")
         defaults.set(immichSyncAlbums, forKey: "immichSyncAlbums")
         defaults.set(immichUpdateChangedAssets, forKey: "immichUpdateChangedAssets")
+        // Persist date filter settings
+        // Ensure start <= end before persisting/using the values
+        ensureDateOrder()
+        defaults.set(dateFilterEnabled, forKey: "dateFilterEnabled")
+        defaults.set(filterStartDate, forKey: "filterStartDate")
+        defaults.set(filterEndDate, forKey: "filterEndDate")
         keychain.set(immichApiKey, account: "immichApiKey")
 
         let sortOrder: PhotoBackupOptions.SortOrder = (order == .oldest) ? .oldestFirst : .newestFirst
@@ -668,7 +702,8 @@ final class PhotoBackupViewModel: ObservableObject {
             sortOrder: sortOrder,
             limit: limit,
             dryRun: dryRun,
-            since: nil,
+            since: dateFilterEnabled ? Calendar.current.startOfDay(for: filterStartDate) : nil,
+            until: dateFilterEnabled ? Calendar.current.date(byAdding: DateComponents(day: 1, second: -1), to: Calendar.current.startOfDay(for: filterEndDate)) : nil,
             albumScope: albumScope,
             libraryScope: libraryScope.coreValue,
             includeAdjustmentData: includeAdjustmentData,
@@ -808,6 +843,9 @@ final class PhotoBackupViewModel: ObservableObject {
                             )
                             Task { @MainActor in
                                 weakSelf?.appendLog("Immich Files: uploaded \(r.uploadedFiles), skipped \(r.skippedExisting), replaced \(r.replacedFiles), errors \(r.errorCount)")
+                                if r.replacedFiles > 0 {
+                                    weakSelf?.replacedCount += r.replacedFiles
+                                }
                             }
                         }
                     }
@@ -828,6 +866,7 @@ final class PhotoBackupViewModel: ObservableObject {
                         // Note: these counts are "upload items" (still/video/edited), not Photos asset count.
                         self.uploadedCount = max(0, plan.immichPlannedUploads - plan.immichWouldSkipExisting - plan.immichWouldReplaceExisting)
                         self.skippedCount = plan.immichWouldSkipExisting
+                        self.replacedCount = plan.immichWouldReplaceExisting
                         self.statusText = "Dry run (device id): would upload \(self.uploadedCount), skip \(plan.immichWouldSkipExisting), replace \(plan.immichWouldReplaceExisting) (\(plan.assetsScanned) assets scanned)"
                         self.appendLog("Dry run complete: planned \(plan.immichPlannedUploads) uploads — would upload \(self.uploadedCount), skip \(plan.immichWouldSkipExisting), replace \(plan.immichWouldReplaceExisting)")
                         if !plan.notes.isEmpty {
@@ -854,7 +893,8 @@ final class PhotoBackupViewModel: ObservableObject {
                         updatedSession.stats = BackupSessionStats(
                             uploadedCount: self.uploadedCount,
                             skippedCount: self.skippedCount,
-                            errorCount: self.errorCount
+                            errorCount: self.errorCount,
+                            replacedCount: self.replacedCount
                         )
                         self.saveSessionState(updatedSession)
                         self.checkForResumableSession()
@@ -1211,6 +1251,16 @@ final class PhotoBackupViewModel: ObservableObject {
                         skippedCount += 1
                     }
                 }
+            } else if msg.contains("replacing existing asset") || msg.contains("Immich: replacing existing asset") {
+                // Count replacements
+                if let baseAssetId = extractBaseAssetId(from: msg) {
+                    if !replacedAssetIds.contains(baseAssetId) {
+                        replacedAssetIds.insert(baseAssetId)
+                        replacedCount += 1
+                    }
+                } else {
+                    replacedCount += 1
+                }
             }
 
             if msg.hasPrefix("Immich: recorded failed upload") {
@@ -1408,6 +1458,7 @@ final class PhotoBackupViewModel: ObservableObject {
                 limit: nil,
                 dryRun: false,
                 since: nil,
+                until: nil,
                 albumScope: .allPhotos,
                 libraryScope: .personalAndShared,
                 includeAdjustmentData: includeAdjustments,
@@ -1506,6 +1557,7 @@ final class PhotoBackupViewModel: ObservableObject {
         uploadedCount = 0
         skippedCount = 0
         errorCount = 0
+        replacedCount = 0
         failedUploadCount = 0
         countedImmichUploadErrorAssetIds = []
         immichExistChecked = 0
