@@ -157,6 +157,7 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published private(set) var iCloudDownloadAssetName: String = ""
     @Published private(set) var iCloudDownloadProgress: Double = 0
     @Published private(set) var iCloudDownloadAttempt: Int = 1
+    @Published private(set) var iCloudTimeoutRemaining: TimeInterval? = nil
     private var iCloudDownloadStartTime: Date?
 
     // Pause/Resume state
@@ -166,6 +167,8 @@ final class PhotoBackupViewModel: ObservableObject {
 
     private let exporter = PhotoBackupExporter()
     private let runState = ManagedBackupRunState()
+    private let managedTimeout = ManagedTimeoutValue(300)
+    private var cancellables = Set<AnyCancellable>()
     private var runningTask: Task<Void, Never>?
     private var currentSessionState: BackupSessionState?
     private var imagesSeen: Int = 0
@@ -264,6 +267,14 @@ final class PhotoBackupViewModel: ObservableObject {
         // Only auto-request photos permission if not showing wizard
         refreshPhotosAuthorizationStatus(autoRequest: !shouldShowSetupWizard)
         refreshAlbumsIfPossible()
+
+        // Sync timeout changes to the thread-safe managed value
+        managedTimeout.store(timeoutSeconds)
+        $timeoutSeconds
+            .sink { [managedTimeout] newValue in
+                managedTimeout.store(newValue)
+            }
+            .store(in: &cancellables)
     }
 
     func completeSetupWizard() {
@@ -664,13 +675,14 @@ final class PhotoBackupViewModel: ObservableObject {
 
         // Capture references for the detached task
         let runStateRef = runState
+        let managedTimeoutRef = managedTimeout
         let customBookmarks = customFolderBookmarks
         let backupModeValue = backupMode.coreValue
         let dryRunValue = dryRun
         let timeoutValue = timeoutSeconds
         let sourceModeValue = sourceMode
         let immichUploadConfig = immichUpload
-        runningTask = Task.detached(priority: .userInitiated) { [exporter, photoOptions, folderExport, session, sessionToUse, runStateRef, customBookmarks, backupModeValue, dryRunValue, timeoutValue, sourceModeValue, immichUploadConfig, weak self] in
+        runningTask = Task.detached(priority: .userInitiated) { [exporter, photoOptions, folderExport, session, sessionToUse, runStateRef, managedTimeoutRef, customBookmarks, backupModeValue, dryRunValue, timeoutValue, sourceModeValue, immichUploadConfig, weak self] in
             // Capture self once at the start for Swift 6 compatibility
             let weakSelf = self
 
@@ -689,7 +701,8 @@ final class PhotoBackupViewModel: ObservableObject {
                         runState: {
                             runStateRef.load()
                         },
-                        sessionState: session
+                        sessionState: session,
+                        timeoutProvider: { managedTimeoutRef.load() }
                     )
                 }
 
@@ -1123,6 +1136,7 @@ final class PhotoBackupViewModel: ObservableObject {
             // Clear iCloud download state when moving to a new asset
             isDownloadingFromiCloud = false
             iCloudDownloadStartTime = nil
+            iCloudTimeoutRemaining = nil
         case .message(let msg):
             appendLog(msg)
             // Only show errors in status text during Immich sync (progress row handles the rest)
@@ -1209,6 +1223,7 @@ final class PhotoBackupViewModel: ObservableObject {
             iCloudDownloadAssetName = baseName
             iCloudDownloadProgress = progress
             iCloudDownloadAttempt = attempt
+            iCloudTimeoutRemaining = max(0, timeoutSeconds - elapsed)
         case .retrying(_, let baseName, let attempt, let maxAttempts, let delay, let reason):
             appendLog("Retry \(attempt)/\(maxAttempts) for \(baseName) in \(String(format: "%.1f", delay))s: \(reason)")
             statusText = "Retrying \(baseName)…"
@@ -1669,6 +1684,25 @@ final class ManagedBackupRunState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return _state
+    }
+}
+
+final class ManagedTimeoutValue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _seconds: TimeInterval
+
+    init(_ seconds: TimeInterval) { _seconds = seconds }
+
+    func store(_ newValue: TimeInterval) {
+        lock.lock()
+        _seconds = newValue
+        lock.unlock()
+    }
+
+    func load() -> TimeInterval {
+        lock.lock()
+        defer { lock.unlock() }
+        return _seconds
     }
 }
 

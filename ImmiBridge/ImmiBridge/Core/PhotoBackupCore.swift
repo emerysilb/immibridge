@@ -720,7 +720,8 @@ public final class PhotoBackupExporter {
         options: PhotoBackupOptions,
         progress: @escaping @Sendable (PhotoBackupProgress) -> Void,
         runState: @escaping @Sendable () -> BackupRunState,
-        sessionState: BackupSessionState? = nil
+        sessionState: BackupSessionState? = nil,
+        timeoutProvider: (() -> TimeInterval)? = nil
     ) throws -> PhotoBackupResult {
         guard options.folderExport != nil || options.immichUpload != nil else {
             throw PhotoBackupError.noOutputsSelected
@@ -735,6 +736,9 @@ public final class PhotoBackupExporter {
 
         // Helper to check if cancelled (not paused)
         let shouldCancel: @Sendable () -> Bool = { runState() == .cancelled }
+
+        // Helper to interrupt polling loops quickly when user clicks Stop
+        let shouldStop: () -> Bool = { runState() != .running }
 
         let immichUploadErrorCounter = AtomicCounter()
         let progressWrapped: @Sendable (PhotoBackupProgress) -> Void = { event in
@@ -1438,11 +1442,15 @@ public final class PhotoBackupExporter {
                                 progress: progressWrapped,
                                 livePhotoVideoId: nil,
                                 awaitImmichAssetId: true,
-                                onImmichAssetId: onImmichAssetId
+                                onImmichAssetId: onImmichAssetId,
+                                shouldStop: shouldStop,
+                                timeoutProvider: timeoutProvider
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             livePhotoVideoId = outcome.immichAssetId
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        } catch let error as NSError where error.code == 499 {
+                            progressWrapped(.message("Stopped by user during live video export"))
                         } catch {
                             assetHadAnyError = true
                             errors += 1
@@ -1472,10 +1480,14 @@ public final class PhotoBackupExporter {
                                 progress: progressWrapped,
                                 livePhotoVideoId: livePhotoVideoId,
                                 awaitImmichAssetId: false,
-                                onImmichAssetId: onImmichAssetId
+                                onImmichAssetId: onImmichAssetId,
+                                shouldStop: shouldStop,
+                                timeoutProvider: timeoutProvider
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        } catch let error as NSError where error.code == 499 {
+                            progressWrapped(.message("Stopped by user during still export"))
                         } catch {
                             assetHadAnyError = true
                             errors += 1
@@ -1506,10 +1518,14 @@ public final class PhotoBackupExporter {
                                 progress: progressWrapped,
                                 livePhotoVideoId: nil,
                                 awaitImmichAssetId: false,
-                                onImmichAssetId: onImmichAssetId
+                                onImmichAssetId: onImmichAssetId,
+                                shouldStop: shouldStop,
+                                timeoutProvider: timeoutProvider
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        } catch let error as NSError where error.code == 499 {
+                            progressWrapped(.message("Stopped by user during adjustments export"))
                         } catch {
                             assetHadAnyError = true
                             errors += 1
@@ -1540,10 +1556,14 @@ public final class PhotoBackupExporter {
                                 progress: progressWrapped,
                                 livePhotoVideoId: nil,
                                 awaitImmichAssetId: false,
-                                onImmichAssetId: onImmichAssetId
+                                onImmichAssetId: onImmichAssetId,
+                                shouldStop: shouldStop,
+                                timeoutProvider: timeoutProvider
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        } catch let error as NSError where error.code == 499 {
+                            progressWrapped(.message("Stopped by user during video export"))
                         } catch {
                             assetHadAnyError = true
                             errors += 1
@@ -1587,7 +1607,9 @@ public final class PhotoBackupExporter {
                                     options: options,
                                     immichPipeline: immichPipeline,
                                     progress: progressWrapped,
-                                    onImmichAssetId: onImmichAssetId
+                                    onImmichAssetId: onImmichAssetId,
+                                    shouldStop: shouldStop,
+                                    timeoutProvider: timeoutProvider
                                 )
                                 if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                                 if let folderOutcome = outcome.folderOutcome {
@@ -1598,6 +1620,8 @@ public final class PhotoBackupExporter {
                                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: existing)
                                     }
                                 }
+                            } catch let error as NSError where error.code == 499 {
+                                progressWrapped(.message("Stopped by user during edited image export"))
                             } catch {
                                 assetHadAnyError = true
                                 errors += 1
@@ -1613,7 +1637,9 @@ public final class PhotoBackupExporter {
                                 options: options,
                                 immichPipeline: immichPipeline,
                                 progress: progressWrapped,
-                                onImmichAssetId: onImmichAssetId
+                                onImmichAssetId: onImmichAssetId,
+                                shouldStop: shouldStop,
+                                timeoutProvider: timeoutProvider
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             if let folderOutcome = outcome.folderOutcome {
@@ -1624,6 +1650,8 @@ public final class PhotoBackupExporter {
                                     upsertManifestIfPossible(key: key, signature: sig, desiredURL: existing)
                                 }
                             }
+                        } catch let error as NSError where error.code == 499 {
+                            progressWrapped(.message("Stopped by user during edited image export"))
                         } catch {
                             assetHadAnyError = true
                             errors += 1
@@ -2166,7 +2194,9 @@ func exportResourceToTemp(
     iCloudTimeoutMultiplier: Double,
     retryConfiguration: RetryConfiguration,
     dryRun: Bool,
-    progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)? = nil
+    progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)? = nil,
+    shouldStop: (() -> Bool)? = nil,
+    timeoutProvider: (() -> TimeInterval)? = nil
 ) throws -> URL {
     if dryRun {
         return tempDir.appendingPathComponent("dryrun-\(UUID().uuidString)", isDirectory: false)
@@ -2186,7 +2216,9 @@ func exportResourceToTemp(
                 networkAccessAllowed: networkAccessAllowed,
                 timeoutSeconds: timeoutSeconds,
                 iCloudTimeoutMultiplier: iCloudTimeoutMultiplier,
-                progressCallback: progressCallback
+                progressCallback: progressCallback,
+                shouldStop: shouldStop,
+                timeoutProvider: timeoutProvider
             )
             return tmpURL
         } catch {
@@ -2198,6 +2230,12 @@ func exportResourceToTemp(
 
             guard classifiedError.isRetryable, attempt < maxAttempts - 1 else {
                 throw classifiedError
+            }
+
+            if shouldStop?() == true {
+                throw NSError(domain: "export", code: 499, userInfo: [
+                    NSLocalizedDescriptionKey: "Export stopped by user (\(filename))."
+                ])
             }
 
             // Calculate delay and wait before retry
@@ -2220,7 +2258,9 @@ private func performSingleResourceExport(
     networkAccessAllowed: Bool,
     timeoutSeconds: TimeInterval,
     iCloudTimeoutMultiplier: Double,
-    progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)?
+    progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)?,
+    shouldStop: (() -> Bool)? = nil,
+    timeoutProvider: (() -> TimeInterval)? = nil
 ) throws {
     let sema = DispatchSemaphore(value: 0)
     var writeError: Error?
@@ -2252,9 +2292,18 @@ private func performSingleResourceExport(
         }
         elapsed += checkInterval
 
+        if shouldStop?() == true {
+            throw NSError(domain: "export", code: 499, userInfo: [
+                NSLocalizedDescriptionKey: "Export stopped by user (\(resource.originalFilename))."
+            ])
+        }
+
         // If iCloud download in progress, extend timeout
+        let baseTimeout = timeoutProvider?() ?? timeoutSeconds
         if tracker.isDownloading {
-            effectiveTimeout = max(effectiveTimeout, timeoutSeconds * iCloudTimeoutMultiplier)
+            effectiveTimeout = max(effectiveTimeout, baseTimeout * iCloudTimeoutMultiplier)
+        } else {
+            effectiveTimeout = baseTimeout
         }
     }
 
@@ -2277,7 +2326,9 @@ func exportEditedImageToTemp(
     iCloudTimeoutMultiplier: Double,
     retryConfiguration: RetryConfiguration,
     dryRun: Bool,
-    progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)? = nil
+    progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)? = nil,
+    shouldStop: (() -> Bool)? = nil,
+    timeoutProvider: (() -> TimeInterval)? = nil
 ) throws -> (tmpURL: URL, ext: String) {
     let filename = "edited image for \(asset.localIdentifier)"
     var lastError: Error?
@@ -2292,7 +2343,9 @@ func exportEditedImageToTemp(
                 timeoutSeconds: timeoutSeconds,
                 iCloudTimeoutMultiplier: iCloudTimeoutMultiplier,
                 dryRun: dryRun,
-                progressCallback: progressCallback
+                progressCallback: progressCallback,
+                shouldStop: shouldStop,
+                timeoutProvider: timeoutProvider
             )
         } catch {
             lastError = error
@@ -2300,6 +2353,12 @@ func exportEditedImageToTemp(
 
             guard classifiedError.isRetryable, attempt < maxAttempts - 1 else {
                 throw classifiedError
+            }
+
+            if shouldStop?() == true {
+                throw NSError(domain: "export", code: 499, userInfo: [
+                    NSLocalizedDescriptionKey: "Export stopped by user (\(filename))."
+                ])
             }
 
             let delay = retryConfiguration.delay(forAttempt: attempt)
@@ -2321,7 +2380,9 @@ private func performSingleEditedImageExport(
     timeoutSeconds: TimeInterval,
     iCloudTimeoutMultiplier: Double,
     dryRun: Bool,
-    progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)?
+    progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)?,
+    shouldStop: (() -> Bool)? = nil,
+    timeoutProvider: (() -> TimeInterval)? = nil
 ) throws -> (tmpURL: URL, ext: String) {
     let sema = DispatchSemaphore(value: 0)
     var resultData: Data?
@@ -2361,8 +2422,17 @@ private func performSingleEditedImageExport(
         }
         elapsed += checkInterval
 
+        if shouldStop?() == true {
+            throw NSError(domain: "export", code: 499, userInfo: [
+                NSLocalizedDescriptionKey: "Export stopped by user (edited image for \(asset.localIdentifier))."
+            ])
+        }
+
+        let baseTimeout = timeoutProvider?() ?? timeoutSeconds
         if tracker.isDownloading {
-            effectiveTimeout = max(effectiveTimeout, timeoutSeconds * iCloudTimeoutMultiplier)
+            effectiveTimeout = max(effectiveTimeout, baseTimeout * iCloudTimeoutMultiplier)
+        } else {
+            effectiveTimeout = baseTimeout
         }
     }
 
@@ -3447,7 +3517,9 @@ private func exportResourceToOutputs(
     progress: @escaping @Sendable (PhotoBackupProgress) -> Void,
     livePhotoVideoId: String?,
     awaitImmichAssetId: Bool,
-    onImmichAssetId: (@Sendable (String?) -> Void)? = nil
+    onImmichAssetId: (@Sendable (String?) -> Void)? = nil,
+    shouldStop: (() -> Bool)? = nil,
+    timeoutProvider: (() -> TimeInterval)? = nil
 ) throws -> OutputsOutcome {
     let tmp = try exportResourceToTemp(
         resource,
@@ -3466,7 +3538,9 @@ private func exportResourceToOutputs(
                     attemptNumber: 1
                 ))
             }
-        }
+        },
+        shouldStop: shouldStop,
+        timeoutProvider: timeoutProvider
     )
 
     var uploadURL: URL = tmp
@@ -3529,7 +3603,9 @@ private func exportEditedImageToOutputs(
     options: PhotoBackupOptions,
     immichPipeline: ImmichUploadPipeline?,
     progress: @escaping @Sendable (PhotoBackupProgress) -> Void,
-    onImmichAssetId: (@Sendable (String?) -> Void)? = nil
+    onImmichAssetId: (@Sendable (String?) -> Void)? = nil,
+    shouldStop: (() -> Bool)? = nil,
+    timeoutProvider: (() -> TimeInterval)? = nil
 ) throws -> OutputsOutcome {
     let (tmp, ext) = try exportEditedImageToTemp(
         asset: asset,
@@ -3548,7 +3624,9 @@ private func exportEditedImageToOutputs(
                     attemptNumber: 1
                 ))
             }
-        }
+        },
+        shouldStop: shouldStop,
+        timeoutProvider: timeoutProvider
     )
 
     let filename = "\(baseName)_edited.\(ext)"
