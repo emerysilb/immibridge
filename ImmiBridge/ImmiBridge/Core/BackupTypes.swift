@@ -1,5 +1,11 @@
 import Foundation
 
+public enum FilenameFormat: String, Codable, Sendable, CaseIterable {
+    case dateAndId            // 2025-04-26_23-47-17_27C7A0E45F.heic
+    case dateAndOriginal      // 2025-04-26_23-47-17_IMG_4177.heic
+    case originalOnly         // IMG_4177.heic
+}
+
 public enum BackupMode: String, Codable, Sendable {
     case full
     case smartIncremental

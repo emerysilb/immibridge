@@ -78,9 +78,8 @@ struct ContentView: View {
                             TextField("", value: $model.timeoutSeconds, format: .number)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 90)
-                                .disabled(model.isRunning)
                         }
-                        .help("Maximum time in seconds to wait for each photo/file download from iCloud before timing out and moving to the next item.")
+                        .help("Maximum time in seconds to wait for each photo/file download from iCloud before timing out and moving to the next item. Can be changed while a backup is running.")
                     }
 
                     HStack(alignment: .top, spacing: 14) {
@@ -430,6 +429,16 @@ private extension ContentView {
 
                 Toggle("Include Hidden Photos", isOn: $model.includeHiddenPhotos)
                     .disabled(model.isRunning)
+
+                Picker("Filename Format", selection: $model.filenameFormat) {
+                    Text("Date + ID (default)").tag(FilenameFormat.dateAndId)
+                    Text("Date + Original Name").tag(FilenameFormat.dateAndOriginal)
+                    Text("Original Name Only").tag(FilenameFormat.originalOnly)
+                }
+                .disabled(model.isRunning)
+                Text("Controls how exported files are named. 'Date + ID' uses capture date and asset ID. 'Date + Original Name' uses capture date and the original Photos filename. 'Original Name Only' uses just the original filename.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
 
             }
             .padding(14)
@@ -858,6 +867,12 @@ private extension ContentView {
                             }
                             Spacer()
                             Text("\(Int(model.iCloudDownloadProgress * 100))%")
+                            Text("timeout: \(Int(model.timeoutSeconds))s")
+                                .foregroundStyle(DesignSystem.Colors.textSecondary.opacity(0.6))
+                            if let remaining = model.iCloudTimeoutRemaining, remaining < model.timeoutSeconds * 0.5 {
+                                Text("(\(Int(remaining))s left)")
+                                    .foregroundStyle(.orange)
+                            }
                         }
                         .font(.system(.caption, design: .rounded))
                         .foregroundStyle(DesignSystem.Colors.textSecondary)
