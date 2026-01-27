@@ -347,6 +347,7 @@ public struct PhotoBackupOptions: Sendable {
     public var retryConfiguration: RetryConfiguration
     public var iCloudTimeoutMultiplier: Double
     public var includeHiddenPhotos: Bool
+    public var filenameFormat: FilenameFormat
 
     public init(
         folderExport: FolderExportOptions? = nil,
@@ -369,7 +370,8 @@ public struct PhotoBackupOptions: Sendable {
         collisionPolicy: CollisionPolicy = .skipIdenticalElseRename,
         retryConfiguration: RetryConfiguration = .default,
         iCloudTimeoutMultiplier: Double = 2.0,
-        includeHiddenPhotos: Bool = false
+        includeHiddenPhotos: Bool = false,
+        filenameFormat: FilenameFormat = .dateAndId
     ) {
         self.folderExport = folderExport
         self.immichUpload = immichUpload
@@ -392,6 +394,7 @@ public struct PhotoBackupOptions: Sendable {
         self.retryConfiguration = retryConfiguration
         self.iCloudTimeoutMultiplier = iCloudTimeoutMultiplier
         self.includeHiddenPhotos = includeHiddenPhotos
+        self.filenameFormat = filenameFormat
     }
 }
 
@@ -1363,8 +1366,9 @@ public final class PhotoBackupExporter {
             }
             if let outDir { try ensureDir(outDir) }
 
-            let base = baseFilename(for: created, localIdentifier: asset.localIdentifier)
             let resources = PHAssetResource.assetResources(for: asset)
+            let originalFilename = resources.first?.originalFilename
+            let base = baseFilename(for: created, localIdentifier: asset.localIdentifier, originalFilename: originalFilename, format: options.filenameFormat)
 
             progress(.exporting(index: i + 1, total: filtered.count, localIdentifier: asset.localIdentifier, baseName: base, mediaTypeRaw: asset.mediaType.rawValue))
 
@@ -1995,14 +1999,31 @@ func usableCaptureDate(_ date: Date?, calendar: Calendar) -> Date? {
     return year >= 1900 ? date : nil
 }
 
-func baseFilename(for date: Date?, localIdentifier: String) -> String {
+func baseFilename(for date: Date?, localIdentifier: String, originalFilename: String? = nil, format: FilenameFormat = .dateAndId) -> String {
     let id = makeAssetIdShort(localIdentifier)
     guard let date else { return "unknown_\(id)" }
     let df = DateFormatter()
     df.locale = Locale(identifier: "en_US_POSIX")
     df.timeZone = .current
     df.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-    return "\(df.string(from: date))_\(id)"
+    let dateStr = df.string(from: date)
+
+    let originalStem = originalFilename.map { ($0 as NSString).deletingPathExtension }
+
+    switch format {
+    case .dateAndId:
+        return "\(dateStr)_\(id)"
+    case .dateAndOriginal:
+        if let stem = originalStem, !stem.isEmpty {
+            return "\(dateStr)_\(stem)"
+        }
+        return "\(dateStr)_\(id)"
+    case .originalOnly:
+        if let stem = originalStem, !stem.isEmpty {
+            return stem
+        }
+        return "\(dateStr)_\(id)"
+    }
 }
 
 func extFromFilename(_ name: String) -> String? {

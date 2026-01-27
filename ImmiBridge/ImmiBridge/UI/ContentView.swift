@@ -393,6 +393,16 @@ private extension ContentView {
                 Toggle("Include Hidden Photos", isOn: $model.includeHiddenPhotos)
                     .disabled(model.isRunning)
 
+                Picker("Filename Format", selection: $model.filenameFormat) {
+                    Text("Date + ID (default)").tag(FilenameFormat.dateAndId)
+                    Text("Date + Original Name").tag(FilenameFormat.dateAndOriginal)
+                    Text("Original Name Only").tag(FilenameFormat.originalOnly)
+                }
+                .disabled(model.isRunning)
+                Text("Controls how exported files are named. 'Date + ID' uses capture date and asset ID. 'Date + Original Name' uses capture date and the original Photos filename. 'Original Name Only' uses just the original filename.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
             }
             .padding(14)
             .background(Color.black.opacity(0.14))

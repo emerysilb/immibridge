@@ -109,6 +109,7 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published var libraryScope: LibraryScope = .personalOnly
     @Published var includeAdjustmentData: Bool = true
     @Published var includeHiddenPhotos: Bool = false
+    @Published var filenameFormat: FilenameFormat = .dateAndId
     @Published var allowNetwork: Bool = true
     @Published var dryRun: Bool = false
     @Published var limit: Int? = nil
@@ -243,6 +244,9 @@ final class PhotoBackupViewModel: ObservableObject {
         }
         includeAdjustmentData = defaults.object(forKey: "includeAdjustmentData") as? Bool ?? true
         includeHiddenPhotos = defaults.object(forKey: "includeHiddenPhotos") as? Bool ?? false
+        if let raw = defaults.string(forKey: "filenameFormat"), let fmt = FilenameFormat(rawValue: raw) {
+            filenameFormat = fmt
+        }
 
         if let arr = defaults.array(forKey: "customFolderBookmarks") as? [Data] {
             customFolderBookmarks = arr
@@ -568,6 +572,7 @@ final class PhotoBackupViewModel: ObservableObject {
         defaults.set(libraryScope.rawValue, forKey: "libraryScope")
         defaults.set(includeAdjustmentData, forKey: "includeAdjustmentData")
         defaults.set(includeHiddenPhotos, forKey: "includeHiddenPhotos")
+        defaults.set(filenameFormat.rawValue, forKey: "filenameFormat")
         defaults.set(immichServerURL, forKey: "immichServerURL")
         defaults.set(immichUploadConcurrency, forKey: "immichUploadConcurrency")
         defaults.set(albumSource.rawValue, forKey: "albumSource")
@@ -670,7 +675,8 @@ final class PhotoBackupViewModel: ObservableObject {
             networkAccessAllowed: allowNetwork,
             requestTimeoutSeconds: timeoutSeconds,
             collisionPolicy: .skipIdenticalElseRename,
-            includeHiddenPhotos: includeHiddenPhotos
+            includeHiddenPhotos: includeHiddenPhotos,
+            filenameFormat: filenameFormat
         )
 
         // Capture references for the detached task
