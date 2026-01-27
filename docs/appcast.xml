@@ -11,7 +11,7 @@
             <sparkle:version>4</sparkle:version>
             <sparkle:shortVersionString>1.0.9</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/emerysilb/immibridge/releases/download/v1.0.9/ImmiBridge-1.0.9.dmg" length="6075056" type="application/octet-stream" sparkle:edSignature="TT7SfGlJOlUDVo7zBwRRSyXo2szaYjG4iDXnyuodQ29N9d3iTQqzGnUWQ//71/ElrYdF1mny/9K5AZbCb0dxBw=="/>
+            <enclosure url="https://github.com/emerysilb/immibridge/releases/download/v1.0.9/ImmiBridge-1.0.9.dmg" length="6147522" type="application/octet-stream" sparkle:edSignature="g+LgxZCOHMT3e2aqUUH8uta1neRXm4X5ocJoWST631uNXJNBhrDzPGep8GrybapbXWpuNHnq2wcbMkkhTiA9CQ=="/>
         </item>
         <item>
             <title>1.0.8</title>
