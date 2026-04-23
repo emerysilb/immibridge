@@ -12,8 +12,9 @@
     <true/>
     <key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
     <array>
-        <string>$(PRODUCT_BUNDLE_IDENTIFIER)-spks</string>
-        <string>$(PRODUCT_BUNDLE_IDENTIFIER)-spki</string>
+        <string>com.emerysilb.ImmiBridge-spks</string>
+        <string>com.emerysilb.ImmiBridge-spki</string>
+        <string>com.apple.security.syspolicy.exec</string>
     </array>
     <key>com.apple.security.temporary-exception.apple-events</key>
     <array>
