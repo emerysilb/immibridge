@@ -68,6 +68,27 @@ final class PhotoBackupViewModel: ObservableObject {
         }
     }
 
+    /// UI-facing enum for folder export organization. Mirrors `Core.FolderOrganization`.
+    enum FolderOrganizationUI: String, CaseIterable, Identifiable {
+        case byDate
+        case byAlbum
+        var id: String { rawValue }
+
+        var coreValue: FolderOrganization {
+            switch self {
+            case .byDate: return .byDate
+            case .byAlbum: return .byAlbum
+            }
+        }
+
+        var displayName: String {
+            switch self {
+            case .byDate: return "By Date (YYYY/MM/DD)"
+            case .byAlbum: return "By Album"
+            }
+        }
+    }
+
     struct AlbumRow: Identifiable, Hashable {
         var id: String { localIdentifier }
         let localIdentifier: String
@@ -98,6 +119,7 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published var destinationMode: DestinationMode = .immich
     @Published var sourceMode: SourceMode = .photos
     @Published var destinationPath: String = ""
+    @Published var folderOrganization: FolderOrganizationUI = .byDate
     @Published var mode: Mode = .originals
     @Published var media: Media = .all
     @Published var order: Order = .oldest
@@ -228,6 +250,10 @@ final class PhotoBackupViewModel: ObservableObject {
         }
         destinationPath = defaults.string(forKey: "destinationPath") ?? ""
         folderDestinationBookmark = defaults.data(forKey: "folderDestinationBookmark")
+        if let raw = defaults.string(forKey: "folderOrganization"),
+           let v = FolderOrganizationUI(rawValue: raw) {
+            folderOrganization = v
+        }
         if let raw = defaults.string(forKey: "albumSource"),
            let v = AlbumSource(rawValue: raw) {
             albumSource = v
@@ -603,6 +629,7 @@ final class PhotoBackupViewModel: ObservableObject {
         defaults.set(media.rawValue, forKey: "media")
         defaults.set(order.rawValue, forKey: "order")
         defaults.set(destinationPath, forKey: "destinationPath")
+        defaults.set(folderOrganization.rawValue, forKey: "folderOrganization")
         defaults.set(backupMode.rawValue, forKey: "backupMode")
         defaults.set(libraryScope.rawValue, forKey: "libraryScope")
         defaults.set(includeAdjustmentData, forKey: "includeAdjustmentData")
@@ -729,7 +756,8 @@ final class PhotoBackupViewModel: ObservableObject {
             requestTimeoutSeconds: timeoutSeconds,
             collisionPolicy: .skipIdenticalElseRename,
             includeHiddenPhotos: includeHiddenPhotos,
-            filenameFormat: filenameFormat
+            filenameFormat: filenameFormat,
+            folderOrganization: folderOrganization.coreValue
         )
 
         // Capture references for the detached task

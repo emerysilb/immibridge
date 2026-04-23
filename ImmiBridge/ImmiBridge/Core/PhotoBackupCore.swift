@@ -472,6 +472,8 @@ public struct PhotoBackupOptions: Sendable {
     public var iCloudTimeoutMultiplier: Double
     public var includeHiddenPhotos: Bool
     public var filenameFormat: FilenameFormat
+    /// Controls how exported files are arranged within the folder destination.
+    public var folderOrganization: FolderOrganization
 
     public init(
         folderExport: FolderExportOptions? = nil,
@@ -496,7 +498,8 @@ public struct PhotoBackupOptions: Sendable {
         retryConfiguration: RetryConfiguration = .default,
         iCloudTimeoutMultiplier: Double = 2.0,
         includeHiddenPhotos: Bool = false,
-        filenameFormat: FilenameFormat = .dateAndOriginal
+        filenameFormat: FilenameFormat = .dateAndOriginal,
+        folderOrganization: FolderOrganization = .byDate
     ) {
         self.folderExport = folderExport
         self.immichUpload = immichUpload
@@ -521,6 +524,7 @@ public struct PhotoBackupOptions: Sendable {
         self.iCloudTimeoutMultiplier = iCloudTimeoutMultiplier
         self.includeHiddenPhotos = includeHiddenPhotos
         self.filenameFormat = filenameFormat
+        self.folderOrganization = folderOrganization
     }
 }
 
@@ -1509,8 +1513,11 @@ public final class PhotoBackupExporter {
         var wasPaused = false
         var pauseIndex: Int? = nil
 
-        func photoManifestKey(assetId: String, variant: String) -> String {
-            "photo:\(assetId):\(variant)"
+        func photoManifestKey(assetId: String, variant: String, folderTag: String? = nil) -> String {
+            if let folderTag, !folderTag.isEmpty {
+                return "photo:\(assetId):\(variant):folder=\(folderTag)"
+            }
+            return "photo:\(assetId):\(variant)"
         }
 
         func photoSignature(asset: PHAsset, variant: String, resourceName: String?) -> String {
@@ -1576,11 +1583,73 @@ public final class PhotoBackupExporter {
             attempted += 1
 
             let created = usableCaptureDate(asset.creationDate, calendar: calendar)
-            let folder = created.map { ymdFolder(for: $0, calendar: calendar) } ?? "Unknown Date"
-            let outDir: URL? = options.folderExport.map { folderExport in
-                folderExport.destination.appendingPathComponent(folder, isDirectory: true)
+
+            // Determine the per-asset destination folder(s) within the folder export root.
+            // For `.byDate` (default): a single `<root>/YYYY/MM/DD/` folder.
+            // For `.byAlbum`: one folder per user album the asset belongs to,
+            //                 or `<root>/_Unsorted/` if it belongs to no user album.
+            // The first entry is treated as the "primary" destination for export
+            // (and any Immich upload). Additional entries receive a file copy.
+            struct PerAssetFolder { let url: URL; let tag: String }
+            var assetFolders: [PerAssetFolder] = []
+            if let folderExport = options.folderExport {
+                switch options.folderOrganization {
+                case .byDate:
+                    let folder = created.map { ymdFolder(for: $0, calendar: calendar) } ?? "Unknown Date"
+                    let url = folderExport.destination.appendingPathComponent(folder, isDirectory: true)
+                    assetFolders.append(PerAssetFolder(url: url, tag: folder))
+                case .byAlbum:
+                    let names = userAlbumFolderNames(for: asset)
+                    if names.isEmpty {
+                        let url = folderExport.destination.appendingPathComponent("_Unsorted", isDirectory: true)
+                        assetFolders.append(PerAssetFolder(url: url, tag: "_Unsorted"))
+                    } else {
+                        for name in names {
+                            let url = folderExport.destination.appendingPathComponent(name, isDirectory: true)
+                            assetFolders.append(PerAssetFolder(url: url, tag: name))
+                        }
+                    }
+                }
             }
-            if let outDir { try ensureDir(outDir) }
+            for f in assetFolders { try ensureDir(f.url) }
+
+            // Primary out dir is used for export (plus optional Immich upload). Additional dirs get a copy.
+            let outDir: URL? = assetFolders.first?.url
+            let primaryFolderTag: String? = assetFolders.first?.tag
+            let additionalFolders: [PerAssetFolder] = assetFolders.count > 1 ? Array(assetFolders.dropFirst()) : []
+
+            // Helper: copy an existing exported file to each additional folder, updating the manifest.
+            // Used only when `folderOrganization == .byAlbum` and the asset is in multiple albums.
+            func mirrorExportToAdditionalFolders(
+                sourceURL: URL,
+                filename: String,
+                variant: String,
+                signature: String
+            ) {
+                guard !additionalFolders.isEmpty else { return }
+                guard FileManager.default.fileExists(atPath: sourceURL.path) else { return }
+                for f in additionalFolders {
+                    let target = f.url.appendingPathComponent(filename, isDirectory: false)
+                    do {
+                        let outcome = try placeTempFile(
+                            tmpURL: sourceURL,
+                            desiredURL: target,
+                            collisionPolicy: options.collisionPolicy,
+                            copyInsteadOfMove: true
+                        )
+                        let placedURL: URL = {
+                            switch outcome {
+                            case .exported(let u): return u
+                            case .skippedIdentical(let u): return u
+                            }
+                        }()
+                        let key = photoManifestKey(assetId: asset.localIdentifier, variant: variant, folderTag: f.tag)
+                        upsertManifestIfPossible(key: key, signature: signature, desiredURL: placedURL)
+                    } catch {
+                        progressWrapped(.message("ERROR copying to album folder \(f.tag): \(error)"))
+                    }
+                }
+            }
 
             let resources = PHAssetResource.assetResources(for: asset)
             let originalFilename = primaryOriginalFilename(from: resources)
@@ -1644,18 +1713,22 @@ public final class PhotoBackupExporter {
                 if let paired {
                     assetHadAnyWork = true
                     let ext = extFromFilename(paired.originalFilename) ?? "mov"
-                    let desiredURL = outDir?.appendingPathComponent("\(base)_live.\(ext)", isDirectory: false)
-                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "pairedVideo")
+                    let filename = "\(base)_live.\(ext)"
+                    let desiredURL = outDir?.appendingPathComponent(filename, isDirectory: false)
+                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "pairedVideo", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "pairedVideo", resourceName: paired.originalFilename)
                     if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        if let primarySource = desiredURL {
+                            mirrorExportToAdditionalFolders(sourceURL: primarySource, filename: filename, variant: "pairedVideo", signature: sig)
+                        }
                     } else {
                         do {
                             let outcome = try exportResourceToOutputs(
                                 resource: paired,
                                 asset: asset,
                                 deviceAssetIdSuffix: ":pairedVideo",
-                                filenameOverride: "\(base)_live.\(ext)",
+                                filenameOverride: filename,
                                 desiredFolderURL: desiredURL,
                                 options: options,
                                 immichPipeline: immichPipeline,
@@ -1670,6 +1743,15 @@ public final class PhotoBackupExporter {
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             livePhotoVideoId = outcome.immichAssetId
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                            if let folderOutcome = outcome.folderOutcome {
+                                let placedURL: URL = {
+                                    switch folderOutcome {
+                                    case .exported(let u): return u
+                                    case .skippedIdentical(let u): return u
+                                    }
+                                }()
+                                mirrorExportToAdditionalFolders(sourceURL: placedURL, filename: filename, variant: "pairedVideo", signature: sig)
+                            }
                         } catch let error as NSError where error.code == 499 {
                             progressWrapped(.message("Stopped by user during live video export"))
                         } catch {
@@ -1683,18 +1765,22 @@ public final class PhotoBackupExporter {
                 if let still {
                     assetHadAnyWork = true
                     let ext = extFromFilename(still.originalFilename) ?? "bin"
-                    let desiredURL = outDir?.appendingPathComponent("\(base).\(ext)", isDirectory: false)
-                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "original")
+                    let filename = "\(base).\(ext)"
+                    let desiredURL = outDir?.appendingPathComponent(filename, isDirectory: false)
+                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "original", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "original", resourceName: still.originalFilename)
                     if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        if let primarySource = desiredURL {
+                            mirrorExportToAdditionalFolders(sourceURL: primarySource, filename: filename, variant: "original", signature: sig)
+                        }
                     } else {
                         do {
                             let outcome = try exportResourceToOutputs(
                                 resource: still,
                                 asset: asset,
                                 deviceAssetIdSuffix: "",
-                                filenameOverride: "\(base).\(ext)",
+                                filenameOverride: filename,
                                 desiredFolderURL: desiredURL,
                                 options: options,
                                 immichPipeline: immichPipeline,
@@ -1708,6 +1794,15 @@ public final class PhotoBackupExporter {
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                            if let folderOutcome = outcome.folderOutcome {
+                                let placedURL: URL = {
+                                    switch folderOutcome {
+                                    case .exported(let u): return u
+                                    case .skippedIdentical(let u): return u
+                                    }
+                                }()
+                                mirrorExportToAdditionalFolders(sourceURL: placedURL, filename: filename, variant: "original", signature: sig)
+                            }
                         } catch let error as NSError where error.code == 499 {
                             progressWrapped(.message("Stopped by user during still export"))
                         } catch {
@@ -1722,18 +1817,22 @@ public final class PhotoBackupExporter {
                 if let adjustments, outDir != nil {
                     assetHadAnyWork = true
                     let ext = extFromFilename(adjustments.originalFilename) ?? extFromUTI(adjustments.uniformTypeIdentifier) ?? "aae"
-                    let desiredURL = outDir?.appendingPathComponent("\(base)_adjustments.\(ext)", isDirectory: false)
-                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "adjustments")
+                    let filename = "\(base)_adjustments.\(ext)"
+                    let desiredURL = outDir?.appendingPathComponent(filename, isDirectory: false)
+                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "adjustments", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "adjustments", resourceName: adjustments.originalFilename)
                     if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        if let primarySource = desiredURL {
+                            mirrorExportToAdditionalFolders(sourceURL: primarySource, filename: filename, variant: "adjustments", signature: sig)
+                        }
                     } else {
                         do {
                             let outcome = try exportResourceToOutputs(
                                 resource: adjustments,
                                 asset: asset,
                                 deviceAssetIdSuffix: ":adjustments",
-                                filenameOverride: "\(base)_adjustments.\(ext)",
+                                filenameOverride: filename,
                                 desiredFolderURL: desiredURL,
                                 options: options,
                                 immichPipeline: nil,  // Never upload adjustment data to Immich
@@ -1747,6 +1846,15 @@ public final class PhotoBackupExporter {
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                            if let folderOutcome = outcome.folderOutcome {
+                                let placedURL: URL = {
+                                    switch folderOutcome {
+                                    case .exported(let u): return u
+                                    case .skippedIdentical(let u): return u
+                                    }
+                                }()
+                                mirrorExportToAdditionalFolders(sourceURL: placedURL, filename: filename, variant: "adjustments", signature: sig)
+                            }
                         } catch let error as NSError where error.code == 499 {
                             progressWrapped(.message("Stopped by user during adjustments export"))
                         } catch {
@@ -1761,18 +1869,22 @@ public final class PhotoBackupExporter {
                     assetHadAnyWork = true
                     let ext = extFromFilename(video.originalFilename) ?? "mov"
                     let suffix = asset.mediaSubtypes.contains(.photoLive) ? "_live" : ""
-                    let desiredURL = outDir?.appendingPathComponent("\(base)\(suffix).\(ext)", isDirectory: false)
-                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "video")
+                    let filename = "\(base)\(suffix).\(ext)"
+                    let desiredURL = outDir?.appendingPathComponent(filename, isDirectory: false)
+                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "video", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "video", resourceName: video.originalFilename)
                     if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        if let primarySource = desiredURL {
+                            mirrorExportToAdditionalFolders(sourceURL: primarySource, filename: filename, variant: "video", signature: sig)
+                        }
                     } else {
                         do {
                             let outcome = try exportResourceToOutputs(
                                 resource: video,
                                 asset: asset,
                                 deviceAssetIdSuffix: ":video",
-                                filenameOverride: "\(base)\(suffix).\(ext)",
+                                filenameOverride: filename,
                                 desiredFolderURL: desiredURL,
                                 options: options,
                                 immichPipeline: immichPipeline,
@@ -1786,6 +1898,15 @@ public final class PhotoBackupExporter {
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                            if let folderOutcome = outcome.folderOutcome {
+                                let placedURL: URL = {
+                                    switch folderOutcome {
+                                    case .exported(let u): return u
+                                    case .skippedIdentical(let u): return u
+                                    }
+                                }()
+                                mirrorExportToAdditionalFolders(sourceURL: placedURL, filename: filename, variant: "video", signature: sig)
+                            }
                         } catch let error as NSError where error.code == 499 {
                             progressWrapped(.message("Stopped by user during video export"))
                         } catch {
@@ -1800,8 +1921,16 @@ public final class PhotoBackupExporter {
             if options.mode == .edited || options.mode == .both {
                 if asset.mediaType == .image, asset.hasAdjustments {
                     assetHadAnyWork = true
-                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "edited")
+                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "edited", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "edited", resourceName: "rendered")
+
+                    // Helper: mirror the edited image (filename comes back from outcome.url) to additional folders.
+                    func mirrorEditedTo(placedURL: URL) {
+                        guard !additionalFolders.isEmpty else { return }
+                        let filename = placedURL.lastPathComponent
+                        mirrorExportToAdditionalFolders(sourceURL: placedURL, filename: filename, variant: "edited", signature: sig)
+                    }
+
                     if options.backupMode != .full,
                        let manifest,
                        let dest = options.folderExport?.destination,
@@ -1821,6 +1950,7 @@ public final class PhotoBackupExporter {
                                 lastSeenRunId: runId,
                                 deletedAt: nil
                             ))
+                            mirrorEditedTo(placedURL: url)
                         } else {
                             // Fall back to rendering if file is missing.
                             do {
@@ -1841,8 +1971,10 @@ public final class PhotoBackupExporter {
                                     switch folderOutcome {
                                     case .exported(let url):
                                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: url)
+                                        mirrorEditedTo(placedURL: url)
                                     case .skippedIdentical(let existing):
                                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: existing)
+                                        mirrorEditedTo(placedURL: existing)
                                     }
                                 }
                             } catch let error as NSError where error.code == 499 {
@@ -1872,8 +2004,10 @@ public final class PhotoBackupExporter {
                                 switch folderOutcome {
                                 case .exported(let url):
                                     upsertManifestIfPossible(key: key, signature: sig, desiredURL: url)
+                                    mirrorEditedTo(placedURL: url)
                                 case .skippedIdentical(let existing):
                                     upsertManifestIfPossible(key: key, signature: sig, desiredURL: existing)
+                                    mirrorEditedTo(placedURL: existing)
                                 }
                             }
                         } catch let error as NSError where error.code == 499 {
@@ -2338,6 +2472,44 @@ func ymdFolder(for date: Date, calendar: Calendar) -> String {
     return String(format: "%04d/%02d/%02d", y, m, d)
 }
 
+/// Sanitize an album title so it is safe to use as a single path component on macOS filesystems.
+/// Replaces `/`, `:`, NUL, leading dots; trims whitespace.
+/// Returns `_Unsorted` if the cleaned name is empty.
+func sanitizeAlbumNameForFolder(_ raw: String) -> String {
+    var s = raw
+    // Replace path-hostile characters with underscore.
+    let bad: [Character] = ["/", ":", "\0", "\\"]
+    s = String(s.map { bad.contains($0) ? "_" : $0 })
+    // Trim whitespace.
+    s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+    // Strip leading dots so directories are not hidden / "." / "..".
+    while s.hasPrefix(".") {
+        s = String(s.dropFirst())
+    }
+    s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+    if s.isEmpty { return "_Unsorted" }
+    return s
+}
+
+/// Returns the sanitized titles of user-created albums that contain the given asset.
+/// System "smart" albums and other non-album collections are excluded.
+/// Returns an empty array if the asset is in no user album.
+func userAlbumFolderNames(for asset: PHAsset) -> [String] {
+    let collections = PHAssetCollection.fetchAssetCollectionsContaining(asset, with: .album, options: nil)
+    var names: [String] = []
+    var seen: Set<String> = []
+    collections.enumerateObjects { collection, _, _ in
+        // Only user-created albums (skip smart albums, shared cloud, etc. handled elsewhere).
+        guard collection.assetCollectionType == .album else { return }
+        let raw = (collection.localizedTitle ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let sanitized = sanitizeAlbumNameForFolder(raw)
+        if seen.insert(sanitized).inserted {
+            names.append(sanitized)
+        }
+    }
+    return names
+}
+
 func usableCaptureDate(_ date: Date?, calendar: Calendar) -> Date? {
     guard let date else { return nil }
     let year = calendar.component(.year, from: date)
@@ -2488,12 +2660,23 @@ public enum ExportOutcome: Sendable {
 func placeTempFile(
     tmpURL: URL,
     desiredURL: URL,
-    collisionPolicy: PhotoBackupOptions.CollisionPolicy
+    collisionPolicy: PhotoBackupOptions.CollisionPolicy,
+    copyInsteadOfMove: Bool = false
 ) throws -> ExportOutcome {
+    // Local helper that either moves or copies the source file, so both code paths
+    // (first-time write and rename-to-avoid-collision) share the same behavior.
+    func placeFile(from src: URL, to dst: URL) throws {
+        if copyInsteadOfMove {
+            try FileManager.default.copyItem(at: src, to: dst)
+        } else {
+            try atomicMove(from: src, to: dst)
+        }
+    }
+
     switch collisionPolicy {
     case .skipIdenticalElseRename:
         if !FileManager.default.fileExists(atPath: desiredURL.path) {
-            try atomicMove(from: tmpURL, to: desiredURL)
+            try placeFile(from: tmpURL, to: desiredURL)
             return .exported(url: desiredURL)
         }
 
@@ -2504,17 +2687,19 @@ func placeTempFile(
         } catch {
             // If we can't hash the existing file, fall back to renaming to avoid clobbering.
             let alt = uniqueURL(desiredURL)
-            try atomicMove(from: tmpURL, to: alt)
+            try placeFile(from: tmpURL, to: alt)
             return .exported(url: alt)
         }
 
         if tmpInfo.size == existingInfo.size, tmpInfo.hashHex == existingInfo.hashHex {
-            try? FileManager.default.removeItem(at: tmpURL)
+            if !copyInsteadOfMove {
+                try? FileManager.default.removeItem(at: tmpURL)
+            }
             return .skippedIdentical(existing: desiredURL)
         }
 
         let alt = uniqueURL(desiredURL)
-        try atomicMove(from: tmpURL, to: alt)
+        try placeFile(from: tmpURL, to: alt)
         return .exported(url: alt)
     }
 }

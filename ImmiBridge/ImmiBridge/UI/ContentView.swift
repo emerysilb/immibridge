@@ -600,6 +600,28 @@ private extension ContentView {
                     }
                     .disabled(model.isRunning)
                 }
+
+                Divider()
+                    .overlay(DesignSystem.Colors.separator.opacity(0.6))
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Organize Files By")
+                        .foregroundStyle(DesignSystem.Colors.textSecondary)
+                    Picker("", selection: $model.folderOrganization) {
+                        ForEach(PhotoBackupViewModel.FolderOrganizationUI.allCases) { opt in
+                            Text(opt.displayName).tag(opt)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(model.isRunning)
+                    Text(model.folderOrganization == .byAlbum
+                         ? "Files are placed in subfolders named after each Photos album. Photos in multiple albums are copied into each. Photos in no album go to _Unsorted/."
+                         : "Files are placed in YYYY/MM/DD subfolders by capture date.")
+                        .font(.caption)
+                        .foregroundStyle(DesignSystem.Colors.textSecondary.opacity(0.85))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(14)
             .background(Color.black.opacity(0.14))
