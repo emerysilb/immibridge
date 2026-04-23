@@ -150,6 +150,11 @@ public struct PHAssetMetadata: Codable, Sendable, Equatable {
     public var mediaType: Int  // PHAssetMediaType raw value
     public var duration: TimeInterval
 
+    // User-visible text from Photos
+    public var title: String?
+    /// Keywords (tags) from Photos. Read via AppleScript, so may be nil if read failed/not attempted.
+    public var keywords: [String]?
+
     public init(
         localIdentifier: String,
         creationDate: Date? = nil,
@@ -164,7 +169,9 @@ public struct PHAssetMetadata: Codable, Sendable, Equatable {
         burstIdentifier: String? = nil,
         representsBurst: Bool = false,
         mediaType: Int = 0,
-        duration: TimeInterval = 0
+        duration: TimeInterval = 0,
+        title: String? = nil,
+        keywords: [String]? = nil
     ) {
         self.localIdentifier = localIdentifier
         self.creationDate = creationDate
@@ -180,6 +187,8 @@ public struct PHAssetMetadata: Codable, Sendable, Equatable {
         self.representsBurst = representsBurst
         self.mediaType = mediaType
         self.duration = duration
+        self.title = title
+        self.keywords = keywords
     }
 
     /// Generate a signature string for change detection
@@ -200,6 +209,12 @@ public struct PHAssetMetadata: Codable, Sendable, Equatable {
         }
         if let mod = modificationDate {
             components.append("mod:\(Int(mod.timeIntervalSince1970))")
+        }
+        if let title, !title.isEmpty {
+            components.append("ttl:\(title)")
+        }
+        if let keywords, !keywords.isEmpty {
+            components.append("kw:\(keywords.sorted().joined(separator: "|"))")
         }
         return components.joined(separator: ";")
     }
@@ -662,7 +677,8 @@ final class AtomicCounter: @unchecked Sendable {
 
 // MARK: - Metadata Extraction
 
-/// Extract complete metadata from a PHAsset for sync tracking
+/// Extract complete metadata from a PHAsset for sync tracking.
+/// Note: keywords are NOT populated here (they require AppleScript). Use `PhotosKeywordReader` for that.
 public func extractMetadata(from asset: PHAsset) -> PHAssetMetadata {
     var metadata = PHAssetMetadata(
         localIdentifier: asset.localIdentifier,
@@ -685,7 +701,80 @@ public func extractMetadata(from asset: PHAsset) -> PHAssetMetadata {
         metadata.altitude = location.altitude
     }
 
+    // Title (rarely set by users, but cheap to read)
+    if let t = asset.value(forKey: "title") as? String, !t.isEmpty {
+        metadata.title = t
+    }
+
     return metadata
+}
+
+// MARK: - Photos Keyword Reader (AppleScript)
+
+/// Reads user-applied keywords (tags) from the Photos app via AppleScript.
+/// Requires `com.apple.security.temporary-exception.apple-events` entitlement
+/// allowing `com.apple.Photos`, plus `NSAppleEventsUsageDescription` in Info.plist.
+final class PhotosKeywordReader: @unchecked Sendable {
+    private var available: Bool = true
+    private let lock = NSLock()
+
+    /// Returns the list of keywords for an asset, or nil if reading failed.
+    /// Returns an empty array when the asset has no keywords.
+    func keywords(for localIdentifier: String) -> [String]? {
+        lock.lock()
+        let canTry = available
+        lock.unlock()
+        guard canTry else { return nil }
+
+        // Photos AppleScript media item ids match PHAsset.localIdentifier in modern macOS,
+        // but on some setups they're just the UUID portion. Try both.
+        let uuidPart = localIdentifier.split(separator: "/").first.map(String.init) ?? localIdentifier
+        for candidate in [localIdentifier, uuidPart] {
+            let safeId = candidate.replacingOccurrences(of: "\"", with: "\\\"")
+            let source = """
+            tell application \"Photos\"
+                try
+                    set theItem to media item id \"\(safeId)\"
+                    set kws to keywords of theItem
+                    if kws is missing value then return \"__OK__\"
+                    set AppleScript's text item delimiters to linefeed
+                    set out to kws as text
+                    set AppleScript's text item delimiters to \"\"
+                    return \"__OK__\" & linefeed & out
+                on error
+                    return \"\"
+                end try
+            end tell
+            """
+            guard let script = NSAppleScript(source: source) else { return nil }
+            var errInfo: NSDictionary?
+            let result = script.executeAndReturnError(&errInfo)
+            if errInfo != nil {
+                // If automation was denied (errAEEventNotPermitted == -1743), give up for the rest of the run.
+                if let code = errInfo?["NSAppleScriptErrorNumber"] as? Int, code == -1743 {
+                    lock.lock()
+                    available = false
+                    lock.unlock()
+                }
+                return nil
+            }
+            let raw = result.stringValue ?? ""
+            if raw.isEmpty { continue }   // not found with this id form, try next
+            // Strip the __OK__ marker and split remaining lines into keywords.
+            var lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            if lines.first == "__OK__" { lines.removeFirst() }
+            return lines
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+        // Neither id form found the asset. Treat as no keywords (don't keep trying).
+        return []
+    }
+
+    var isAvailable: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return available
+    }
 }
 
 /// Check if metadata has changed since last sync
@@ -1824,6 +1913,14 @@ public final class PhotoBackupExporter {
             var metadataNotInImmich = 0
             let metadataTotal = filtered.count
 
+            // Tag sync setup: read keywords from Photos via AppleScript and push to Immich.
+            let keywordReader = PhotosKeywordReader()
+            // name (lowercased for case-insensitive match) -> Immich tag id
+            var tagIdByName: [String: String] = [:]
+            // Lazily populated on first asset that has keywords.
+            var loadedExistingTags = false
+            var keywordsDeniedAnnounced = false
+
             for (metadataIndex, asset) in filtered.enumerated() {
                 if shouldStopMetadataSync() { break }
 
@@ -1836,7 +1933,15 @@ public final class PhotoBackupExporter {
                     notInImmich: metadataNotInImmich
                 ))
 
-                let currentMetadata = extractMetadata(from: asset)
+                var currentMetadata = extractMetadata(from: asset)
+                // Read keywords from Photos (AppleScript). Nil = read failed/denied; treated as "unknown".
+                if keywordReader.isAvailable {
+                    currentMetadata.keywords = keywordReader.keywords(for: asset.localIdentifier)
+                    if !keywordReader.isAvailable && !keywordsDeniedAnnounced {
+                        keywordsDeniedAnnounced = true
+                        progressWrapped(.message("Metadata: tag sync skipped (Photos automation not authorized; grant in System Settings > Privacy > Automation)"))
+                    }
+                }
                 let currentSignature = currentMetadata.signature()
 
                 // Check if we have a mapping for this asset
@@ -1934,18 +2039,89 @@ public final class PhotoBackupExporter {
                     }
                 }
 
-                // Skip if no changes to sync
-                guard update.hasChanges else {
+                // Title (Photos "title") -> Immich description.
+                // PHAsset has no description field; Immich already extracts EXIF/IPTC ImageDescription
+                // from uploaded files, so we only fill description from Photos title (when set) to
+                // preserve user-entered text that EXIF wouldn't capture.
+                if let title = currentMetadata.title, !title.isEmpty {
+                    if overwrite {
+                        update.description = title
+                    }
+                    // Additive mode: don't clobber an existing description that may have come from EXIF.
+                    // (We can't easily diff against current Immich description without an extra fetch field;
+                    // skipping in additive mode is the conservative choice.)
+                }
+
+                // Tag sync (independent of update DTO; runs even if no other field changed)
+                let assetKeywords = (currentMetadata.keywords ?? []).filter { !$0.isEmpty }
+                let needsTagSync = !assetKeywords.isEmpty
+
+                // Skip API call if no field changes AND no tags to sync
+                let hasUpdateFields = update.hasChanges
+                if !hasUpdateFields && !needsTagSync {
                     metadataSkipped += 1
                     continue
                 }
 
                 if shouldStopMetadataSync() { break }
 
-                do {
-                    _ = try runSync { try await immichClient.updateAssetIfExists(assetId: mapping.immichAssetId, update: update) }
+                var assetUpdateOK = true
+                if hasUpdateFields {
+                    let updateSnapshot = update
+                    do {
+                        _ = try runSync { try await immichClient.updateAssetIfExists(assetId: mapping.immichAssetId, update: updateSnapshot) }
+                    } catch {
+                        assetUpdateOK = false
+                        metadataErrors += 1
+                        progressWrapped(.message("ERROR Metadata: sync failed for \(asset.localIdentifier): \(error)"))
+                    }
+                }
 
-                    // Update mapping with new signature
+                // Tag sync — best-effort, separate from asset metadata update.
+                var tagSyncOK = true
+                if needsTagSync {
+                    if !loadedExistingTags {
+                        loadedExistingTags = true
+                        do {
+                            let existing = try runSync { try await immichClient.listTags() }
+                            for t in existing {
+                                let n = (t.name ?? t.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !n.isEmpty { tagIdByName[n.lowercased()] = t.id }
+                            }
+                        } catch {
+                            progressWrapped(.message("WARN Metadata: could not list Immich tags: \(error)"))
+                        }
+                    }
+
+                    // Find names we don't yet have ids for and upsert them.
+                    let missing = assetKeywords.filter { tagIdByName[$0.lowercased()] == nil }
+                    if !missing.isEmpty {
+                        do {
+                            let created = try runSync { try await immichClient.upsertTags(names: missing) }
+                            for t in created {
+                                let n = (t.name ?? t.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !n.isEmpty { tagIdByName[n.lowercased()] = t.id }
+                            }
+                        } catch {
+                            tagSyncOK = false
+                            progressWrapped(.message("WARN Metadata: tag upsert failed for \(asset.localIdentifier): \(error)"))
+                        }
+                    }
+
+                    // Attach each tag to this asset.
+                    for name in assetKeywords {
+                        guard let tagId = tagIdByName[name.lowercased()] else { continue }
+                        do {
+                            try runSync { try await immichClient.addAssetsToTag(tagId: tagId, assetIds: [mapping.immichAssetId]) }
+                        } catch {
+                            tagSyncOK = false
+                            progressWrapped(.message("WARN Metadata: attach tag '\(name)' failed for \(asset.localIdentifier): \(error)"))
+                        }
+                    }
+                }
+
+                if assetUpdateOK && tagSyncOK {
+                    // Update mapping with new signature only if everything succeeded.
                     let updatedMapping = AssetMapping(
                         localIdentifier: mapping.localIdentifier,
                         immichAssetId: mapping.immichAssetId,
@@ -1954,11 +2130,9 @@ public final class PhotoBackupExporter {
                         lastSyncedAt: Date()
                     )
                     try? assetMappingStore.upsert(updatedMapping)
-
-                    metadataSynced += 1
-                } catch {
-                    metadataErrors += 1
-                    progressWrapped(.message("ERROR Metadata: sync failed for \(asset.localIdentifier): \(error)"))
+                    if hasUpdateFields || needsTagSync {
+                        metadataSynced += 1
+                    }
                 }
 
                 if shouldStopMetadataSync() { break }
@@ -2664,7 +2838,7 @@ final class ImmichClient {
     // MARK: - Metadata Update
 
     /// Request body for PUT /assets/{id}
-    struct UpdateAssetDto: Encodable {
+    struct UpdateAssetDto: Encodable, Sendable {
         var dateTimeOriginal: String?
         var description: String?
         var isFavorite: Bool?
@@ -2754,6 +2928,42 @@ final class ImmichClient {
             return nil
         }
     }
+
+    // MARK: - Tags
+
+    struct TagDto: Decodable {
+        let id: String
+        let name: String?
+        let value: String?
+    }
+
+    /// List all tags on the server.
+    func listTags() async throws -> [TagDto] {
+        try await requestJSON(method: "GET", path: "tags", body: Optional<Data>.none)
+    }
+
+    /// Create (or fetch existing) tags by name. Returns the created/found TagDto for each name.
+    /// Uses the Immich v2.5+ upsert endpoint: PUT /api/tags  body: { "tags": ["name1", ...] }
+    func upsertTags(names: [String]) async throws -> [TagDto] {
+        guard !names.isEmpty else { return [] }
+        let body = try JSONSerialization.data(withJSONObject: ["tags": names], options: [])
+        // Some Immich versions expose the upsert at PUT /tags, others at PUT /tags/upsert.
+        do {
+            return try await requestJSON(method: "PUT", path: "tags", body: body)
+        } catch {
+            // Fallback for older API surface
+            return try await requestJSON(method: "PUT", path: "tags/upsert", body: body)
+        }
+    }
+
+    /// Bulk-attach a single tag to many assets. Body: { "ids": [assetId, ...] }
+    /// Endpoint: PUT /api/tags/{tagId}/assets
+    func addAssetsToTag(tagId: String, assetIds: [String]) async throws {
+        guard !assetIds.isEmpty else { return }
+        let body = try JSONSerialization.data(withJSONObject: ["ids": assetIds], options: [])
+        _ = try await requestRaw(method: "PUT", path: "tags/\(tagId)/assets", body: body)
+    }
+
 
     func uploadAsset(
         fileURL: URL,

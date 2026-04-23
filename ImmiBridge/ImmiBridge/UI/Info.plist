@@ -22,6 +22,8 @@
 	<string>12.0</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2025 Emery Silberman. All rights reserved.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>ImmiBridge uses Photos automation to read keywords (tags) so they can be synced to Immich.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>ImmiBridge needs local network access to connect to your Immich server.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
