@@ -440,6 +440,7 @@ private extension ContentView {
 
                 Toggle("Include Adjustment Data", isOn: $model.includeAdjustmentData)
                     .disabled(model.isRunning)
+                    .help("When on, also exports the original photo's edit instructions (a sidecar .aae/.plist file with crop, filters, and markup) into the destination folder next to the photo. Adjustment sidecars are folder-only and are never uploaded to Immich.")
 
                 Toggle("Include Hidden Photos", isOn: $model.includeHiddenPhotos)
                     .disabled(model.isRunning)

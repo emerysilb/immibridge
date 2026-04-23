@@ -375,7 +375,7 @@ public struct PhotoBackupOptions: Sendable {
         retryConfiguration: RetryConfiguration = .default,
         iCloudTimeoutMultiplier: Double = 2.0,
         includeHiddenPhotos: Bool = false,
-        filenameFormat: FilenameFormat = .dateAndId
+        filenameFormat: FilenameFormat = .dateAndOriginal
     ) {
         self.folderExport = folderExport
         self.immichUpload = immichUpload
@@ -1364,7 +1364,7 @@ public final class PhotoBackupExporter {
             if let outDir { try ensureDir(outDir) }
 
             let resources = PHAssetResource.assetResources(for: asset)
-            let originalFilename = resources.first?.originalFilename
+            let originalFilename = primaryOriginalFilename(from: resources)
             let base = baseFilename(for: created, localIdentifier: asset.localIdentifier, originalFilename: originalFilename, format: options.filenameFormat)
 
             progress(.exporting(index: i + 1, total: filtered.count, localIdentifier: asset.localIdentifier, baseName: base, mediaTypeRaw: asset.mediaType.rawValue))
@@ -2034,7 +2034,47 @@ func usableCaptureDate(_ date: Date?, calendar: Calendar) -> Date? {
     return year >= 1900 ? date : nil
 }
 
-func baseFilename(for date: Date?, localIdentifier: String, originalFilename: String? = nil, format: FilenameFormat = .dateAndId) -> String {
+/// Returns the originalFilename of the asset's primary photo/video resource,
+/// preferring the still or video before falling back to whatever resource exists
+/// (e.g. adjustment sidecars) so the resulting name reflects what the user sees
+/// in the Photos app rather than a sidecar's name.
+func primaryOriginalFilename(from resources: [PHAssetResource]) -> String? {
+    let preferredOrder: [PHAssetResourceType] = [
+        .photo, .fullSizePhoto,
+        .video, .fullSizeVideo,
+        .pairedVideo, .fullSizePairedVideo,
+        .audio
+    ]
+    for type in preferredOrder {
+        if let r = resources.first(where: { $0.type == type }), !r.originalFilename.isEmpty {
+            return r.originalFilename
+        }
+    }
+    return resources.first?.originalFilename
+}
+
+/// Sanitize a filename stem so it is safe to embed in an output path:
+/// strip path separators, NUL, control characters, trim whitespace,
+/// and cap length to keep total path components well under filesystem limits.
+/// Does not lowercase — original casing is preserved.
+func sanitizeOriginalNameStem(_ stem: String, maxLength: Int = 60) -> String {
+    var cleaned = stem.replacingOccurrences(of: "/", with: "_")
+    cleaned = cleaned.replacingOccurrences(of: "\\", with: "_")
+    cleaned = cleaned.replacingOccurrences(of: ":", with: "_")
+    cleaned = cleaned.replacingOccurrences(of: "\0", with: "")
+    // Strip ASCII control characters (0x00-0x1F and 0x7F).
+    cleaned = String(cleaned.unicodeScalars.filter { scalar in
+        let v = scalar.value
+        return !(v < 0x20 || v == 0x7F)
+    })
+    cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    if cleaned.count > maxLength {
+        cleaned = String(cleaned.prefix(maxLength))
+    }
+    return cleaned
+}
+
+func baseFilename(for date: Date?, localIdentifier: String, originalFilename: String? = nil, format: FilenameFormat = .dateAndOriginal) -> String {
     let id = makeAssetIdShort(localIdentifier)
     guard let date else { return "unknown_\(id)" }
     let df = DateFormatter()
@@ -2043,18 +2083,23 @@ func baseFilename(for date: Date?, localIdentifier: String, originalFilename: St
     df.dateFormat = "yyyy-MM-dd_HH-mm-ss"
     let dateStr = df.string(from: date)
 
-    let originalStem = originalFilename.map { ($0 as NSString).deletingPathExtension }
+    let originalStem: String? = {
+        guard let raw = originalFilename else { return nil }
+        let stem = (raw as NSString).deletingPathExtension
+        let cleaned = sanitizeOriginalNameStem(stem)
+        return cleaned.isEmpty ? nil : cleaned
+    }()
 
     switch format {
     case .dateAndId:
         return "\(dateStr)_\(id)"
     case .dateAndOriginal:
-        if let stem = originalStem, !stem.isEmpty {
+        if let stem = originalStem {
             return "\(dateStr)_\(stem)"
         }
         return "\(dateStr)_\(id)"
     case .originalOnly:
-        if let stem = originalStem, !stem.isEmpty {
+        if let stem = originalStem {
             return stem
         }
         return "\(dateStr)_\(id)"

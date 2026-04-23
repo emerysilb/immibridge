@@ -109,7 +109,7 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published var libraryScope: LibraryScope = .personalOnly
     @Published var includeAdjustmentData: Bool = true
     @Published var includeHiddenPhotos: Bool = false
-    @Published var filenameFormat: FilenameFormat = .dateAndId
+    @Published var filenameFormat: FilenameFormat = .dateAndOriginal
     @Published var allowNetwork: Bool = true
     @Published var dryRun: Bool = false
     @Published var limit: Int? = nil
