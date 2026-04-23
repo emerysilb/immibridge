@@ -1084,7 +1084,7 @@ public final class PhotoBackupExporter {
                     }
 
                     if options.mode == .edited || options.mode == .both {
-                        if asset.mediaType == .image || asset.mediaType == .video {
+                        if (asset.mediaType == .image || asset.mediaType == .video), asset.hasAdjustments {
                             ids.append(asset.localIdentifier + ":edited")
                         }
                     }
@@ -1136,7 +1136,7 @@ public final class PhotoBackupExporter {
                     }
 
                     if options.mode == .edited || options.mode == .both {
-                        if asset.mediaType == .image || asset.mediaType == .video {
+                        if (asset.mediaType == .image || asset.mediaType == .video), asset.hasAdjustments {
                             plannedEdited += 1
                             outputs.append((label: "edited", id: asset.localIdentifier + ":edited"))
                         }
@@ -1260,7 +1260,7 @@ public final class PhotoBackupExporter {
                 }
 
                 if options.mode == .edited || options.mode == .both {
-                    if asset.mediaType == .image || asset.mediaType == .video {
+                    if (asset.mediaType == .image || asset.mediaType == .video), asset.hasAdjustments {
                         ids.append(asset.localIdentifier + ":edited")
                     }
                 }
@@ -1402,7 +1402,7 @@ public final class PhotoBackupExporter {
                 }
 
                 if options.mode == .edited || options.mode == .both {
-                    if asset.mediaType == .image || asset.mediaType == .video {
+                    if (asset.mediaType == .image || asset.mediaType == .video), asset.hasAdjustments {
                         ids.append(asset.localIdentifier + ":edited")
                     }
                 }
@@ -1575,7 +1575,7 @@ public final class PhotoBackupExporter {
             }
 
             if options.mode == .edited || options.mode == .both {
-                if asset.mediaType == .image {
+                if asset.mediaType == .image, asset.hasAdjustments {
                     assetHadAnyWork = true
                     let key = photoManifestKey(assetId: asset.localIdentifier, variant: "edited")
                     let sig = photoSignature(asset: asset, variant: "edited", resourceName: "rendered")
@@ -1659,7 +1659,7 @@ public final class PhotoBackupExporter {
                             progressWrapped(.message("ERROR exporting edited image: \(error)"))
                         }
                     }
-                } else if asset.mediaType == .video {
+                } else if asset.mediaType == .video, asset.hasAdjustments {
                     let editedVideo = resources.first { $0.type == .fullSizeVideo } ?? resources.first { $0.type == .video }
                     if let editedVideo {
                         assetHadAnyWork = true
