@@ -379,18 +379,32 @@ private extension ContentView {
                             .toggleStyle(.switch)
                             .disabled(model.isRunning)
 
-                        HStack(spacing: 8) {
-                            DatePicker("From", selection: $model.filterStartDate, displayedComponents: .date)
-                                .labelsHidden()
-                                .accessibilityLabel("From")
-                                .disabled(!model.dateFilterEnabled || model.isRunning)
-                                .frame(maxWidth: 180)
+                        if model.dateFilterEnabled {
+                            Picker("Mode", selection: $model.useRelativeDateRange) {
+                                Text("Custom Range").tag(false)
+                                Text("Last X Days").tag(true)
+                            }
+                            .pickerStyle(.segmented)
+                            .disabled(model.isRunning)
 
-                            DatePicker("To", selection: $model.filterEndDate, displayedComponents: .date)
-                                .labelsHidden()
-                                .accessibilityLabel("To")
-                                .disabled(!model.dateFilterEnabled || model.isRunning)
-                                .frame(maxWidth: 180)
+                            if model.useRelativeDateRange {
+                                Stepper("Last \(model.relativeDaysBack) days", value: $model.relativeDaysBack, in: 1...3650)
+                                    .disabled(model.isRunning)
+                            } else {
+                                HStack(spacing: 8) {
+                                    DatePicker("From", selection: $model.filterStartDate, displayedComponents: .date)
+                                        .labelsHidden()
+                                        .accessibilityLabel("From")
+                                        .disabled(model.isRunning)
+                                        .frame(maxWidth: 180)
+
+                                    DatePicker("To", selection: $model.filterEndDate, displayedComponents: .date)
+                                        .labelsHidden()
+                                        .accessibilityLabel("To")
+                                        .disabled(model.isRunning)
+                                        .frame(maxWidth: 180)
+                                }
+                            }
                         }
                     }
                     .font(.system(.subheadline, design: .rounded))

@@ -1084,7 +1084,7 @@ public final class PhotoBackupExporter {
                     }
 
                     if options.mode == .edited || options.mode == .both {
-                        if asset.mediaType == .image {
+                        if asset.mediaType == .image || asset.mediaType == .video {
                             ids.append(asset.localIdentifier + ":edited")
                         }
                     }
@@ -1136,7 +1136,7 @@ public final class PhotoBackupExporter {
                     }
 
                     if options.mode == .edited || options.mode == .both {
-                        if asset.mediaType == .image {
+                        if asset.mediaType == .image || asset.mediaType == .video {
                             plannedEdited += 1
                             outputs.append((label: "edited", id: asset.localIdentifier + ":edited"))
                         }
@@ -1260,7 +1260,7 @@ public final class PhotoBackupExporter {
                 }
 
                 if options.mode == .edited || options.mode == .both {
-                    if asset.mediaType == .image {
+                    if asset.mediaType == .image || asset.mediaType == .video {
                         ids.append(asset.localIdentifier + ":edited")
                     }
                 }
@@ -1402,7 +1402,7 @@ public final class PhotoBackupExporter {
                 }
 
                 if options.mode == .edited || options.mode == .both {
-                    if asset.mediaType == .image {
+                    if asset.mediaType == .image || asset.mediaType == .video {
                         ids.append(asset.localIdentifier + ":edited")
                     }
                 }
@@ -1657,6 +1657,44 @@ public final class PhotoBackupExporter {
                             assetHadAnyError = true
                             errors += 1
                             progressWrapped(.message("ERROR exporting edited image: \(error)"))
+                        }
+                    }
+                } else if asset.mediaType == .video {
+                    let editedVideo = resources.first { $0.type == .fullSizeVideo } ?? resources.first { $0.type == .video }
+                    if let editedVideo {
+                        assetHadAnyWork = true
+                        let ext = extFromFilename(editedVideo.originalFilename) ?? "mov"
+                        let desiredURL = outDir?.appendingPathComponent("\(base)_edited.\(ext)", isDirectory: false)
+                        let key = photoManifestKey(assetId: asset.localIdentifier, variant: "edited")
+                        let sig = photoSignature(asset: asset, variant: "edited", resourceName: editedVideo.originalFilename)
+                        if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
+                            upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        } else {
+                            do {
+                                let outcome = try exportResourceToOutputs(
+                                    resource: editedVideo,
+                                    asset: asset,
+                                    deviceAssetIdSuffix: ":edited",
+                                    filenameOverride: "\(base)_edited.\(ext)",
+                                    desiredFolderURL: desiredURL,
+                                    options: options,
+                                    immichPipeline: immichPipeline,
+                                    progress: progressWrapped,
+                                    livePhotoVideoId: nil,
+                                    awaitImmichAssetId: false,
+                                    onImmichAssetId: onImmichAssetId,
+                                    shouldStop: shouldStop,
+                                    timeoutProvider: timeoutProvider
+                                )
+                                if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
+                                upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                            } catch let error as NSError where error.code == 499 {
+                                progressWrapped(.message("Stopped by user during edited video export"))
+                            } catch {
+                                assetHadAnyError = true
+                                errors += 1
+                                progressWrapped(.message("ERROR exporting edited video: \(error)"))
+                            }
                         }
                     }
                 }
@@ -2551,25 +2589,25 @@ final class ImmichClient {
     }
 
     func getAssetIdByDeviceId(deviceId: String, deviceAssetId: String) async throws -> String? {
-        let candidatePaths = [
-            "assets/device/\(deviceId)/\(deviceAssetId)",
-            "assets/assetByDeviceId/\(deviceId)/\(deviceAssetId)"
+        let searchBody: [String: Any] = [
+            "deviceAssetId": deviceAssetId,
+            "deviceId": deviceId
         ]
-        for path in candidatePaths {
-            do {
-                let data = try await requestRaw(method: "GET", path: path, body: Optional<Data>.none)
-                if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let id = obj["id"] as? String {
-                    return id
-                }
-                struct AssetIdDto: Decodable { let id: String }
-                if let dto = try? JSONDecoder().decode(AssetIdDto.self, from: data) {
-                    return dto.id
-                }
-            } catch {
-                continue
+        let body = try JSONSerialization.data(withJSONObject: searchBody, options: [])
+
+        do {
+            let data = try await requestRaw(method: "POST", path: "search/metadata", body: body)
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let assets = obj["assets"] as? [String: Any],
+               let items = assets["items"] as? [[String: Any]],
+               let first = items.first,
+               let id = first["id"] as? String {
+                return id
             }
+        } catch {
+            print("getAssetIdByDeviceId search failed: \(error)")
         }
+
         return nil
     }
 
