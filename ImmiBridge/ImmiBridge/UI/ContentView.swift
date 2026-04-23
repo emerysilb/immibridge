@@ -379,18 +379,32 @@ private extension ContentView {
                             .toggleStyle(.switch)
                             .disabled(model.isRunning)
 
-                        HStack(spacing: 8) {
-                            DatePicker("From", selection: $model.filterStartDate, displayedComponents: .date)
-                                .labelsHidden()
-                                .accessibilityLabel("From")
-                                .disabled(!model.dateFilterEnabled || model.isRunning)
-                                .frame(maxWidth: 180)
+                        if model.dateFilterEnabled {
+                            Picker("Mode", selection: $model.useRelativeDateRange) {
+                                Text("Custom Range").tag(false)
+                                Text("Last X Days").tag(true)
+                            }
+                            .pickerStyle(.segmented)
+                            .disabled(model.isRunning)
 
-                            DatePicker("To", selection: $model.filterEndDate, displayedComponents: .date)
-                                .labelsHidden()
-                                .accessibilityLabel("To")
-                                .disabled(!model.dateFilterEnabled || model.isRunning)
-                                .frame(maxWidth: 180)
+                            if model.useRelativeDateRange {
+                                Stepper("Last \(model.relativeDaysBack) days", value: $model.relativeDaysBack, in: 1...3650)
+                                    .disabled(model.isRunning)
+                            } else {
+                                HStack(spacing: 8) {
+                                    DatePicker("From", selection: $model.filterStartDate, displayedComponents: .date)
+                                        .labelsHidden()
+                                        .accessibilityLabel("From")
+                                        .disabled(model.isRunning)
+                                        .frame(maxWidth: 180)
+
+                                    DatePicker("To", selection: $model.filterEndDate, displayedComponents: .date)
+                                        .labelsHidden()
+                                        .accessibilityLabel("To")
+                                        .disabled(model.isRunning)
+                                        .frame(maxWidth: 180)
+                                }
+                            }
                         }
                     }
                     .font(.system(.subheadline, design: .rounded))
@@ -426,6 +440,7 @@ private extension ContentView {
 
                 Toggle("Include Adjustment Data", isOn: $model.includeAdjustmentData)
                     .disabled(model.isRunning)
+                    .help("When on, also exports the original photo's edit instructions (a sidecar .aae/.plist file with crop, filters, and markup) into the destination folder next to the photo. Adjustment sidecars are folder-only and are never uploaded to Immich.")
 
                 Toggle("Include Hidden Photos", isOn: $model.includeHiddenPhotos)
                     .disabled(model.isRunning)
@@ -584,6 +599,28 @@ private extension ContentView {
                         model.chooseDestination()
                     }
                     .disabled(model.isRunning)
+                }
+
+                Divider()
+                    .overlay(DesignSystem.Colors.separator.opacity(0.6))
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Organize Files By")
+                        .foregroundStyle(DesignSystem.Colors.textSecondary)
+                    Picker("", selection: $model.folderOrganization) {
+                        ForEach(PhotoBackupViewModel.FolderOrganizationUI.allCases) { opt in
+                            Text(opt.displayName).tag(opt)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(model.isRunning)
+                    Text(model.folderOrganization == .byAlbum
+                         ? "Files are placed in subfolders named after each Photos album. Photos in multiple albums are copied into each. Photos in no album go to _Unsorted/."
+                         : "Files are placed in YYYY/MM/DD subfolders by capture date.")
+                        .font(.caption)
+                        .foregroundStyle(DesignSystem.Colors.textSecondary.opacity(0.85))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(14)

@@ -110,6 +110,112 @@ public struct BackupSessionState: Codable, Sendable {
     }
 }
 
+// MARK: - In-Flight Cancellation Registry
+
+/// Tracks in-flight PhotoKit and URLSession requests so the user can interrupt
+/// a hung asset by clicking Stop. The orchestrator calls `cancelAll()` exactly
+/// once when the run state transitions to non-running; per-call register/deregister
+/// ensures we never cancel a request that has already finished.
+public final class InFlightCancellationRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var photoKitImageRequestIds: Set<Int32> = []
+    private var photoKitResourceRequestIds: Set<Int32> = []
+    // Weak refs would be nice, but URLSessionTask isn't NSObject-friendly for that.
+    // We hold strong refs and rely on deregister-on-completion to release.
+    private var urlSessionTasks: [ObjectIdentifier: URLSessionTask] = [:]
+    private var cancelled: Bool = false
+
+    public init() {}
+
+    /// Returns true if cancellation has already been signaled. New requests
+    /// can use this to avoid registering work that should not start.
+    public func isCancelled() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func registerImageRequest(_ id: Int32) {
+        lock.lock()
+        photoKitImageRequestIds.insert(id)
+        lock.unlock()
+    }
+
+    func deregisterImageRequest(_ id: Int32) {
+        lock.lock()
+        photoKitImageRequestIds.remove(id)
+        lock.unlock()
+    }
+
+    func registerResourceRequest(_ id: Int32) {
+        lock.lock()
+        photoKitResourceRequestIds.insert(id)
+        lock.unlock()
+    }
+
+    func deregisterResourceRequest(_ id: Int32) {
+        lock.lock()
+        photoKitResourceRequestIds.remove(id)
+        lock.unlock()
+    }
+
+    func registerURLSessionTask(_ task: URLSessionTask) {
+        lock.lock()
+        let alreadyCancelled = cancelled
+        if !alreadyCancelled {
+            urlSessionTasks[ObjectIdentifier(task)] = task
+        }
+        lock.unlock()
+        // If a Stop happened between the caller deciding to start and us holding
+        // the lock, cancel immediately so we don't leak a hung request.
+        if alreadyCancelled {
+            task.cancel()
+        }
+    }
+
+    func deregisterURLSessionTask(_ task: URLSessionTask) {
+        lock.lock()
+        urlSessionTasks.removeValue(forKey: ObjectIdentifier(task))
+        lock.unlock()
+    }
+
+    /// Cancels everything currently registered. Safe to call multiple times.
+    /// New work registered after this point will be cancelled immediately
+    /// in `registerURLSessionTask` (PhotoKit registrations don't have an
+    /// equivalent fast path; the per-asset shouldStop check covers them).
+    public func cancelAll() {
+        lock.lock()
+        cancelled = true
+        let imageIds = photoKitImageRequestIds
+        let resourceIds = photoKitResourceRequestIds
+        let tasks = Array(urlSessionTasks.values)
+        photoKitImageRequestIds.removeAll()
+        photoKitResourceRequestIds.removeAll()
+        urlSessionTasks.removeAll()
+        lock.unlock()
+
+        for id in imageIds {
+            PHImageManager.default().cancelImageRequest(id)
+        }
+        for id in resourceIds {
+            PHAssetResourceManager.default().cancelDataRequest(id)
+        }
+        for task in tasks {
+            task.cancel()
+        }
+    }
+
+    /// Re-arms the registry for a fresh run after cancellation.
+    func reset() {
+        lock.lock()
+        cancelled = false
+        photoKitImageRequestIds.removeAll()
+        photoKitResourceRequestIds.removeAll()
+        urlSessionTasks.removeAll()
+        lock.unlock()
+    }
+}
+
 public struct FolderExportOptions: Sendable {
     public var destination: URL
 
@@ -150,6 +256,11 @@ public struct PHAssetMetadata: Codable, Sendable, Equatable {
     public var mediaType: Int  // PHAssetMediaType raw value
     public var duration: TimeInterval
 
+    // User-visible text from Photos
+    public var title: String?
+    /// Keywords (tags) from Photos. Read via AppleScript, so may be nil if read failed/not attempted.
+    public var keywords: [String]?
+
     public init(
         localIdentifier: String,
         creationDate: Date? = nil,
@@ -164,7 +275,9 @@ public struct PHAssetMetadata: Codable, Sendable, Equatable {
         burstIdentifier: String? = nil,
         representsBurst: Bool = false,
         mediaType: Int = 0,
-        duration: TimeInterval = 0
+        duration: TimeInterval = 0,
+        title: String? = nil,
+        keywords: [String]? = nil
     ) {
         self.localIdentifier = localIdentifier
         self.creationDate = creationDate
@@ -180,6 +293,8 @@ public struct PHAssetMetadata: Codable, Sendable, Equatable {
         self.representsBurst = representsBurst
         self.mediaType = mediaType
         self.duration = duration
+        self.title = title
+        self.keywords = keywords
     }
 
     /// Generate a signature string for change detection
@@ -200,6 +315,12 @@ public struct PHAssetMetadata: Codable, Sendable, Equatable {
         }
         if let mod = modificationDate {
             components.append("mod:\(Int(mod.timeIntervalSince1970))")
+        }
+        if let title, !title.isEmpty {
+            components.append("ttl:\(title)")
+        }
+        if let keywords, !keywords.isEmpty {
+            components.append("kw:\(keywords.sorted().joined(separator: "|"))")
         }
         return components.joined(separator: ";")
     }
@@ -351,6 +472,8 @@ public struct PhotoBackupOptions: Sendable {
     public var iCloudTimeoutMultiplier: Double
     public var includeHiddenPhotos: Bool
     public var filenameFormat: FilenameFormat
+    /// Controls how exported files are arranged within the folder destination.
+    public var folderOrganization: FolderOrganization
 
     public init(
         folderExport: FolderExportOptions? = nil,
@@ -375,7 +498,8 @@ public struct PhotoBackupOptions: Sendable {
         retryConfiguration: RetryConfiguration = .default,
         iCloudTimeoutMultiplier: Double = 2.0,
         includeHiddenPhotos: Bool = false,
-        filenameFormat: FilenameFormat = .dateAndId
+        filenameFormat: FilenameFormat = .dateAndOriginal,
+        folderOrganization: FolderOrganization = .byDate
     ) {
         self.folderExport = folderExport
         self.immichUpload = immichUpload
@@ -400,6 +524,7 @@ public struct PhotoBackupOptions: Sendable {
         self.iCloudTimeoutMultiplier = iCloudTimeoutMultiplier
         self.includeHiddenPhotos = includeHiddenPhotos
         self.filenameFormat = filenameFormat
+        self.folderOrganization = folderOrganization
     }
 }
 
@@ -662,7 +787,8 @@ final class AtomicCounter: @unchecked Sendable {
 
 // MARK: - Metadata Extraction
 
-/// Extract complete metadata from a PHAsset for sync tracking
+/// Extract complete metadata from a PHAsset for sync tracking.
+/// Note: keywords are NOT populated here (they require AppleScript). Use `PhotosKeywordReader` for that.
 public func extractMetadata(from asset: PHAsset) -> PHAssetMetadata {
     var metadata = PHAssetMetadata(
         localIdentifier: asset.localIdentifier,
@@ -685,7 +811,80 @@ public func extractMetadata(from asset: PHAsset) -> PHAssetMetadata {
         metadata.altitude = location.altitude
     }
 
+    // Title (rarely set by users, but cheap to read)
+    if let t = asset.value(forKey: "title") as? String, !t.isEmpty {
+        metadata.title = t
+    }
+
     return metadata
+}
+
+// MARK: - Photos Keyword Reader (AppleScript)
+
+/// Reads user-applied keywords (tags) from the Photos app via AppleScript.
+/// Requires `com.apple.security.temporary-exception.apple-events` entitlement
+/// allowing `com.apple.Photos`, plus `NSAppleEventsUsageDescription` in Info.plist.
+final class PhotosKeywordReader: @unchecked Sendable {
+    private var available: Bool = true
+    private let lock = NSLock()
+
+    /// Returns the list of keywords for an asset, or nil if reading failed.
+    /// Returns an empty array when the asset has no keywords.
+    func keywords(for localIdentifier: String) -> [String]? {
+        lock.lock()
+        let canTry = available
+        lock.unlock()
+        guard canTry else { return nil }
+
+        // Photos AppleScript media item ids match PHAsset.localIdentifier in modern macOS,
+        // but on some setups they're just the UUID portion. Try both.
+        let uuidPart = localIdentifier.split(separator: "/").first.map(String.init) ?? localIdentifier
+        for candidate in [localIdentifier, uuidPart] {
+            let safeId = candidate.replacingOccurrences(of: "\"", with: "\\\"")
+            let source = """
+            tell application \"Photos\"
+                try
+                    set theItem to media item id \"\(safeId)\"
+                    set kws to keywords of theItem
+                    if kws is missing value then return \"__OK__\"
+                    set AppleScript's text item delimiters to linefeed
+                    set out to kws as text
+                    set AppleScript's text item delimiters to \"\"
+                    return \"__OK__\" & linefeed & out
+                on error
+                    return \"\"
+                end try
+            end tell
+            """
+            guard let script = NSAppleScript(source: source) else { return nil }
+            var errInfo: NSDictionary?
+            let result = script.executeAndReturnError(&errInfo)
+            if errInfo != nil {
+                // If automation was denied (errAEEventNotPermitted == -1743), give up for the rest of the run.
+                if let code = errInfo?["NSAppleScriptErrorNumber"] as? Int, code == -1743 {
+                    lock.lock()
+                    available = false
+                    lock.unlock()
+                }
+                return nil
+            }
+            let raw = result.stringValue ?? ""
+            if raw.isEmpty { continue }   // not found with this id form, try next
+            // Strip the __OK__ marker and split remaining lines into keywords.
+            var lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            if lines.first == "__OK__" { lines.removeFirst() }
+            return lines
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+        // Neither id form found the asset. Treat as no keywords (don't keep trying).
+        return []
+    }
+
+    var isAvailable: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return available
+    }
 }
 
 /// Check if metadata has changed since last sync
@@ -706,7 +905,21 @@ public func metadataChangedSinceLastSync(
 }
 
 public final class PhotoBackupExporter {
+    /// Registry of in-flight PhotoKit/URLSession requests for the current run.
+    /// `cancelInFlight()` interrupts whatever the worker threads are blocked on
+    /// so the user's Stop click takes effect immediately rather than waiting
+    /// for a hung asset to time out.
+    public let inFlightRegistry = InFlightCancellationRegistry()
+
     public init() {}
+
+    /// Forces all currently in-flight PhotoKit/URLSession requests to abort.
+    /// Call this from the UI when the user clicks Stop, in addition to flipping
+    /// the run state. Per-asset catch blocks convert the resulting errors to
+    /// user-stop entries so the existing logging remains accurate.
+    public func cancelInFlight() {
+        inFlightRegistry.cancelAll()
+    }
 
     public func requestPhotosAuthorization() -> PHAuthorizationStatus {
         let current = PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -742,6 +955,11 @@ public final class PhotoBackupExporter {
 
         try ensureDir(options.tempDir)
 
+        // Reset cancellation registry for a fresh run. Anything left over from a
+        // prior cancelled run would otherwise refuse to start new URLSession tasks.
+        inFlightRegistry.reset()
+        let registry = inFlightRegistry
+
         // Helper to check if cancelled (not paused)
         let shouldCancel: @Sendable () -> Bool = { runState() == .cancelled }
 
@@ -764,7 +982,12 @@ public final class PhotoBackupExporter {
             config.timeoutIntervalForResource = options.requestTimeoutSeconds
             config.httpMaximumConnectionsPerHost = immichUpload.uploadConcurrency
             let session = URLSession(configuration: config)
-            let client = ImmichClient(serverURL: immichUpload.serverURL, apiKey: immichUpload.apiKey, session: session)
+            let client = ImmichClient(
+                serverURL: immichUpload.serverURL,
+                apiKey: immichUpload.apiKey,
+                session: session,
+                cancellationRegistry: registry
+            )
             immichClient = client
             immichPipeline = ImmichUploadPipeline(
                 immich: immichUpload,
@@ -1084,7 +1307,7 @@ public final class PhotoBackupExporter {
                     }
 
                     if options.mode == .edited || options.mode == .both {
-                        if asset.mediaType == .image {
+                        if (asset.mediaType == .image || asset.mediaType == .video), asset.hasAdjustments {
                             ids.append(asset.localIdentifier + ":edited")
                         }
                     }
@@ -1136,7 +1359,7 @@ public final class PhotoBackupExporter {
                     }
 
                     if options.mode == .edited || options.mode == .both {
-                        if asset.mediaType == .image {
+                        if (asset.mediaType == .image || asset.mediaType == .video), asset.hasAdjustments {
                             plannedEdited += 1
                             outputs.append((label: "edited", id: asset.localIdentifier + ":edited"))
                         }
@@ -1260,7 +1483,7 @@ public final class PhotoBackupExporter {
                 }
 
                 if options.mode == .edited || options.mode == .both {
-                    if asset.mediaType == .image {
+                    if (asset.mediaType == .image || asset.mediaType == .video), asset.hasAdjustments {
                         ids.append(asset.localIdentifier + ":edited")
                     }
                 }
@@ -1290,8 +1513,11 @@ public final class PhotoBackupExporter {
         var wasPaused = false
         var pauseIndex: Int? = nil
 
-        func photoManifestKey(assetId: String, variant: String) -> String {
-            "photo:\(assetId):\(variant)"
+        func photoManifestKey(assetId: String, variant: String, folderTag: String? = nil) -> String {
+            if let folderTag, !folderTag.isEmpty {
+                return "photo:\(assetId):\(variant):folder=\(folderTag)"
+            }
+            return "photo:\(assetId):\(variant)"
         }
 
         func photoSignature(asset: PHAsset, variant: String, resourceName: String?) -> String {
@@ -1357,14 +1583,76 @@ public final class PhotoBackupExporter {
             attempted += 1
 
             let created = usableCaptureDate(asset.creationDate, calendar: calendar)
-            let folder = created.map { ymdFolder(for: $0, calendar: calendar) } ?? "Unknown Date"
-            let outDir: URL? = options.folderExport.map { folderExport in
-                folderExport.destination.appendingPathComponent(folder, isDirectory: true)
+
+            // Determine the per-asset destination folder(s) within the folder export root.
+            // For `.byDate` (default): a single `<root>/YYYY/MM/DD/` folder.
+            // For `.byAlbum`: one folder per user album the asset belongs to,
+            //                 or `<root>/_Unsorted/` if it belongs to no user album.
+            // The first entry is treated as the "primary" destination for export
+            // (and any Immich upload). Additional entries receive a file copy.
+            struct PerAssetFolder { let url: URL; let tag: String }
+            var assetFolders: [PerAssetFolder] = []
+            if let folderExport = options.folderExport {
+                switch options.folderOrganization {
+                case .byDate:
+                    let folder = created.map { ymdFolder(for: $0, calendar: calendar) } ?? "Unknown Date"
+                    let url = folderExport.destination.appendingPathComponent(folder, isDirectory: true)
+                    assetFolders.append(PerAssetFolder(url: url, tag: folder))
+                case .byAlbum:
+                    let names = userAlbumFolderNames(for: asset)
+                    if names.isEmpty {
+                        let url = folderExport.destination.appendingPathComponent("_Unsorted", isDirectory: true)
+                        assetFolders.append(PerAssetFolder(url: url, tag: "_Unsorted"))
+                    } else {
+                        for name in names {
+                            let url = folderExport.destination.appendingPathComponent(name, isDirectory: true)
+                            assetFolders.append(PerAssetFolder(url: url, tag: name))
+                        }
+                    }
+                }
             }
-            if let outDir { try ensureDir(outDir) }
+            for f in assetFolders { try ensureDir(f.url) }
+
+            // Primary out dir is used for export (plus optional Immich upload). Additional dirs get a copy.
+            let outDir: URL? = assetFolders.first?.url
+            let primaryFolderTag: String? = assetFolders.first?.tag
+            let additionalFolders: [PerAssetFolder] = assetFolders.count > 1 ? Array(assetFolders.dropFirst()) : []
+
+            // Helper: copy an existing exported file to each additional folder, updating the manifest.
+            // Used only when `folderOrganization == .byAlbum` and the asset is in multiple albums.
+            func mirrorExportToAdditionalFolders(
+                sourceURL: URL,
+                filename: String,
+                variant: String,
+                signature: String
+            ) {
+                guard !additionalFolders.isEmpty else { return }
+                guard FileManager.default.fileExists(atPath: sourceURL.path) else { return }
+                for f in additionalFolders {
+                    let target = f.url.appendingPathComponent(filename, isDirectory: false)
+                    do {
+                        let outcome = try placeTempFile(
+                            tmpURL: sourceURL,
+                            desiredURL: target,
+                            collisionPolicy: options.collisionPolicy,
+                            copyInsteadOfMove: true
+                        )
+                        let placedURL: URL = {
+                            switch outcome {
+                            case .exported(let u): return u
+                            case .skippedIdentical(let u): return u
+                            }
+                        }()
+                        let key = photoManifestKey(assetId: asset.localIdentifier, variant: variant, folderTag: f.tag)
+                        upsertManifestIfPossible(key: key, signature: signature, desiredURL: placedURL)
+                    } catch {
+                        progressWrapped(.message("ERROR copying to album folder \(f.tag): \(error)"))
+                    }
+                }
+            }
 
             let resources = PHAssetResource.assetResources(for: asset)
-            let originalFilename = resources.first?.originalFilename
+            let originalFilename = primaryOriginalFilename(from: resources)
             let base = baseFilename(for: created, localIdentifier: asset.localIdentifier, originalFilename: originalFilename, format: options.filenameFormat)
 
             progress(.exporting(index: i + 1, total: filtered.count, localIdentifier: asset.localIdentifier, baseName: base, mediaTypeRaw: asset.mediaType.rawValue))
@@ -1402,7 +1690,7 @@ public final class PhotoBackupExporter {
                 }
 
                 if options.mode == .edited || options.mode == .both {
-                    if asset.mediaType == .image {
+                    if (asset.mediaType == .image || asset.mediaType == .video), asset.hasAdjustments {
                         ids.append(asset.localIdentifier + ":edited")
                     }
                 }
@@ -1425,18 +1713,22 @@ public final class PhotoBackupExporter {
                 if let paired {
                     assetHadAnyWork = true
                     let ext = extFromFilename(paired.originalFilename) ?? "mov"
-                    let desiredURL = outDir?.appendingPathComponent("\(base)_live.\(ext)", isDirectory: false)
-                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "pairedVideo")
+                    let filename = "\(base)_live.\(ext)"
+                    let desiredURL = outDir?.appendingPathComponent(filename, isDirectory: false)
+                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "pairedVideo", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "pairedVideo", resourceName: paired.originalFilename)
                     if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        if let primarySource = desiredURL {
+                            mirrorExportToAdditionalFolders(sourceURL: primarySource, filename: filename, variant: "pairedVideo", signature: sig)
+                        }
                     } else {
                         do {
                             let outcome = try exportResourceToOutputs(
                                 resource: paired,
                                 asset: asset,
                                 deviceAssetIdSuffix: ":pairedVideo",
-                                filenameOverride: "\(base)_live.\(ext)",
+                                filenameOverride: filename,
                                 desiredFolderURL: desiredURL,
                                 options: options,
                                 immichPipeline: immichPipeline,
@@ -1445,11 +1737,21 @@ public final class PhotoBackupExporter {
                                 awaitImmichAssetId: true,
                                 onImmichAssetId: onImmichAssetId,
                                 shouldStop: shouldStop,
-                                timeoutProvider: timeoutProvider
+                                timeoutProvider: timeoutProvider,
+                                cancellationRegistry: registry
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             livePhotoVideoId = outcome.immichAssetId
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                            if let folderOutcome = outcome.folderOutcome {
+                                let placedURL: URL = {
+                                    switch folderOutcome {
+                                    case .exported(let u): return u
+                                    case .skippedIdentical(let u): return u
+                                    }
+                                }()
+                                mirrorExportToAdditionalFolders(sourceURL: placedURL, filename: filename, variant: "pairedVideo", signature: sig)
+                            }
                         } catch let error as NSError where error.code == 499 {
                             progressWrapped(.message("Stopped by user during live video export"))
                         } catch {
@@ -1463,18 +1765,22 @@ public final class PhotoBackupExporter {
                 if let still {
                     assetHadAnyWork = true
                     let ext = extFromFilename(still.originalFilename) ?? "bin"
-                    let desiredURL = outDir?.appendingPathComponent("\(base).\(ext)", isDirectory: false)
-                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "original")
+                    let filename = "\(base).\(ext)"
+                    let desiredURL = outDir?.appendingPathComponent(filename, isDirectory: false)
+                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "original", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "original", resourceName: still.originalFilename)
                     if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        if let primarySource = desiredURL {
+                            mirrorExportToAdditionalFolders(sourceURL: primarySource, filename: filename, variant: "original", signature: sig)
+                        }
                     } else {
                         do {
                             let outcome = try exportResourceToOutputs(
                                 resource: still,
                                 asset: asset,
                                 deviceAssetIdSuffix: "",
-                                filenameOverride: "\(base).\(ext)",
+                                filenameOverride: filename,
                                 desiredFolderURL: desiredURL,
                                 options: options,
                                 immichPipeline: immichPipeline,
@@ -1483,10 +1789,20 @@ public final class PhotoBackupExporter {
                                 awaitImmichAssetId: false,
                                 onImmichAssetId: onImmichAssetId,
                                 shouldStop: shouldStop,
-                                timeoutProvider: timeoutProvider
+                                timeoutProvider: timeoutProvider,
+                                cancellationRegistry: registry
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                            if let folderOutcome = outcome.folderOutcome {
+                                let placedURL: URL = {
+                                    switch folderOutcome {
+                                    case .exported(let u): return u
+                                    case .skippedIdentical(let u): return u
+                                    }
+                                }()
+                                mirrorExportToAdditionalFolders(sourceURL: placedURL, filename: filename, variant: "original", signature: sig)
+                            }
                         } catch let error as NSError where error.code == 499 {
                             progressWrapped(.message("Stopped by user during still export"))
                         } catch {
@@ -1501,18 +1817,22 @@ public final class PhotoBackupExporter {
                 if let adjustments, outDir != nil {
                     assetHadAnyWork = true
                     let ext = extFromFilename(adjustments.originalFilename) ?? extFromUTI(adjustments.uniformTypeIdentifier) ?? "aae"
-                    let desiredURL = outDir?.appendingPathComponent("\(base)_adjustments.\(ext)", isDirectory: false)
-                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "adjustments")
+                    let filename = "\(base)_adjustments.\(ext)"
+                    let desiredURL = outDir?.appendingPathComponent(filename, isDirectory: false)
+                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "adjustments", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "adjustments", resourceName: adjustments.originalFilename)
                     if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        if let primarySource = desiredURL {
+                            mirrorExportToAdditionalFolders(sourceURL: primarySource, filename: filename, variant: "adjustments", signature: sig)
+                        }
                     } else {
                         do {
                             let outcome = try exportResourceToOutputs(
                                 resource: adjustments,
                                 asset: asset,
                                 deviceAssetIdSuffix: ":adjustments",
-                                filenameOverride: "\(base)_adjustments.\(ext)",
+                                filenameOverride: filename,
                                 desiredFolderURL: desiredURL,
                                 options: options,
                                 immichPipeline: nil,  // Never upload adjustment data to Immich
@@ -1521,10 +1841,20 @@ public final class PhotoBackupExporter {
                                 awaitImmichAssetId: false,
                                 onImmichAssetId: onImmichAssetId,
                                 shouldStop: shouldStop,
-                                timeoutProvider: timeoutProvider
+                                timeoutProvider: timeoutProvider,
+                                cancellationRegistry: registry
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                            if let folderOutcome = outcome.folderOutcome {
+                                let placedURL: URL = {
+                                    switch folderOutcome {
+                                    case .exported(let u): return u
+                                    case .skippedIdentical(let u): return u
+                                    }
+                                }()
+                                mirrorExportToAdditionalFolders(sourceURL: placedURL, filename: filename, variant: "adjustments", signature: sig)
+                            }
                         } catch let error as NSError where error.code == 499 {
                             progressWrapped(.message("Stopped by user during adjustments export"))
                         } catch {
@@ -1539,18 +1869,22 @@ public final class PhotoBackupExporter {
                     assetHadAnyWork = true
                     let ext = extFromFilename(video.originalFilename) ?? "mov"
                     let suffix = asset.mediaSubtypes.contains(.photoLive) ? "_live" : ""
-                    let desiredURL = outDir?.appendingPathComponent("\(base)\(suffix).\(ext)", isDirectory: false)
-                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "video")
+                    let filename = "\(base)\(suffix).\(ext)"
+                    let desiredURL = outDir?.appendingPathComponent(filename, isDirectory: false)
+                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "video", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "video", resourceName: video.originalFilename)
                     if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        if let primarySource = desiredURL {
+                            mirrorExportToAdditionalFolders(sourceURL: primarySource, filename: filename, variant: "video", signature: sig)
+                        }
                     } else {
                         do {
                             let outcome = try exportResourceToOutputs(
                                 resource: video,
                                 asset: asset,
                                 deviceAssetIdSuffix: ":video",
-                                filenameOverride: "\(base)\(suffix).\(ext)",
+                                filenameOverride: filename,
                                 desiredFolderURL: desiredURL,
                                 options: options,
                                 immichPipeline: immichPipeline,
@@ -1559,10 +1893,20 @@ public final class PhotoBackupExporter {
                                 awaitImmichAssetId: false,
                                 onImmichAssetId: onImmichAssetId,
                                 shouldStop: shouldStop,
-                                timeoutProvider: timeoutProvider
+                                timeoutProvider: timeoutProvider,
+                                cancellationRegistry: registry
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                            if let folderOutcome = outcome.folderOutcome {
+                                let placedURL: URL = {
+                                    switch folderOutcome {
+                                    case .exported(let u): return u
+                                    case .skippedIdentical(let u): return u
+                                    }
+                                }()
+                                mirrorExportToAdditionalFolders(sourceURL: placedURL, filename: filename, variant: "video", signature: sig)
+                            }
                         } catch let error as NSError where error.code == 499 {
                             progressWrapped(.message("Stopped by user during video export"))
                         } catch {
@@ -1575,10 +1919,18 @@ public final class PhotoBackupExporter {
             }
 
             if options.mode == .edited || options.mode == .both {
-                if asset.mediaType == .image {
+                if asset.mediaType == .image, asset.hasAdjustments {
                     assetHadAnyWork = true
-                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "edited")
+                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: "edited", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "edited", resourceName: "rendered")
+
+                    // Helper: mirror the edited image (filename comes back from outcome.url) to additional folders.
+                    func mirrorEditedTo(placedURL: URL) {
+                        guard !additionalFolders.isEmpty else { return }
+                        let filename = placedURL.lastPathComponent
+                        mirrorExportToAdditionalFolders(sourceURL: placedURL, filename: filename, variant: "edited", signature: sig)
+                    }
+
                     if options.backupMode != .full,
                        let manifest,
                        let dest = options.folderExport?.destination,
@@ -1598,6 +1950,7 @@ public final class PhotoBackupExporter {
                                 lastSeenRunId: runId,
                                 deletedAt: nil
                             ))
+                            mirrorEditedTo(placedURL: url)
                         } else {
                             // Fall back to rendering if file is missing.
                             do {
@@ -1610,15 +1963,18 @@ public final class PhotoBackupExporter {
                                     progress: progressWrapped,
                                     onImmichAssetId: onImmichAssetId,
                                     shouldStop: shouldStop,
-                                    timeoutProvider: timeoutProvider
+                                    timeoutProvider: timeoutProvider,
+                                    cancellationRegistry: registry
                                 )
                                 if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                                 if let folderOutcome = outcome.folderOutcome {
                                     switch folderOutcome {
                                     case .exported(let url):
                                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: url)
+                                        mirrorEditedTo(placedURL: url)
                                     case .skippedIdentical(let existing):
                                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: existing)
+                                        mirrorEditedTo(placedURL: existing)
                                     }
                                 }
                             } catch let error as NSError where error.code == 499 {
@@ -1640,15 +1996,18 @@ public final class PhotoBackupExporter {
                                 progress: progressWrapped,
                                 onImmichAssetId: onImmichAssetId,
                                 shouldStop: shouldStop,
-                                timeoutProvider: timeoutProvider
+                                timeoutProvider: timeoutProvider,
+                                cancellationRegistry: registry
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             if let folderOutcome = outcome.folderOutcome {
                                 switch folderOutcome {
                                 case .exported(let url):
                                     upsertManifestIfPossible(key: key, signature: sig, desiredURL: url)
+                                    mirrorEditedTo(placedURL: url)
                                 case .skippedIdentical(let existing):
                                     upsertManifestIfPossible(key: key, signature: sig, desiredURL: existing)
+                                    mirrorEditedTo(placedURL: existing)
                                 }
                             }
                         } catch let error as NSError where error.code == 499 {
@@ -1657,6 +2016,44 @@ public final class PhotoBackupExporter {
                             assetHadAnyError = true
                             errors += 1
                             progressWrapped(.message("ERROR exporting edited image: \(error)"))
+                        }
+                    }
+                } else if asset.mediaType == .video, asset.hasAdjustments {
+                    let editedVideo = resources.first { $0.type == .fullSizeVideo } ?? resources.first { $0.type == .video }
+                    if let editedVideo {
+                        assetHadAnyWork = true
+                        let ext = extFromFilename(editedVideo.originalFilename) ?? "mov"
+                        let desiredURL = outDir?.appendingPathComponent("\(base)_edited.\(ext)", isDirectory: false)
+                        let key = photoManifestKey(assetId: asset.localIdentifier, variant: "edited")
+                        let sig = photoSignature(asset: asset, variant: "edited", resourceName: editedVideo.originalFilename)
+                        if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
+                            upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                        } else {
+                            do {
+                                let outcome = try exportResourceToOutputs(
+                                    resource: editedVideo,
+                                    asset: asset,
+                                    deviceAssetIdSuffix: ":edited",
+                                    filenameOverride: "\(base)_edited.\(ext)",
+                                    desiredFolderURL: desiredURL,
+                                    options: options,
+                                    immichPipeline: immichPipeline,
+                                    progress: progressWrapped,
+                                    livePhotoVideoId: nil,
+                                    awaitImmichAssetId: false,
+                                    onImmichAssetId: onImmichAssetId,
+                                    shouldStop: shouldStop,
+                                    timeoutProvider: timeoutProvider
+                                )
+                                if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
+                                upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
+                            } catch let error as NSError where error.code == 499 {
+                                progressWrapped(.message("Stopped by user during edited video export"))
+                            } catch {
+                                assetHadAnyError = true
+                                errors += 1
+                                progressWrapped(.message("ERROR exporting edited video: \(error)"))
+                            }
                         }
                     }
                 }
@@ -1786,6 +2183,14 @@ public final class PhotoBackupExporter {
             var metadataNotInImmich = 0
             let metadataTotal = filtered.count
 
+            // Tag sync setup: read keywords from Photos via AppleScript and push to Immich.
+            let keywordReader = PhotosKeywordReader()
+            // name (lowercased for case-insensitive match) -> Immich tag id
+            var tagIdByName: [String: String] = [:]
+            // Lazily populated on first asset that has keywords.
+            var loadedExistingTags = false
+            var keywordsDeniedAnnounced = false
+
             for (metadataIndex, asset) in filtered.enumerated() {
                 if shouldStopMetadataSync() { break }
 
@@ -1798,7 +2203,15 @@ public final class PhotoBackupExporter {
                     notInImmich: metadataNotInImmich
                 ))
 
-                let currentMetadata = extractMetadata(from: asset)
+                var currentMetadata = extractMetadata(from: asset)
+                // Read keywords from Photos (AppleScript). Nil = read failed/denied; treated as "unknown".
+                if keywordReader.isAvailable {
+                    currentMetadata.keywords = keywordReader.keywords(for: asset.localIdentifier)
+                    if !keywordReader.isAvailable && !keywordsDeniedAnnounced {
+                        keywordsDeniedAnnounced = true
+                        progressWrapped(.message("Metadata: tag sync skipped (Photos automation not authorized; grant in System Settings > Privacy > Automation)"))
+                    }
+                }
                 let currentSignature = currentMetadata.signature()
 
                 // Check if we have a mapping for this asset
@@ -1896,18 +2309,89 @@ public final class PhotoBackupExporter {
                     }
                 }
 
-                // Skip if no changes to sync
-                guard update.hasChanges else {
+                // Title (Photos "title") -> Immich description.
+                // PHAsset has no description field; Immich already extracts EXIF/IPTC ImageDescription
+                // from uploaded files, so we only fill description from Photos title (when set) to
+                // preserve user-entered text that EXIF wouldn't capture.
+                if let title = currentMetadata.title, !title.isEmpty {
+                    if overwrite {
+                        update.description = title
+                    }
+                    // Additive mode: don't clobber an existing description that may have come from EXIF.
+                    // (We can't easily diff against current Immich description without an extra fetch field;
+                    // skipping in additive mode is the conservative choice.)
+                }
+
+                // Tag sync (independent of update DTO; runs even if no other field changed)
+                let assetKeywords = (currentMetadata.keywords ?? []).filter { !$0.isEmpty }
+                let needsTagSync = !assetKeywords.isEmpty
+
+                // Skip API call if no field changes AND no tags to sync
+                let hasUpdateFields = update.hasChanges
+                if !hasUpdateFields && !needsTagSync {
                     metadataSkipped += 1
                     continue
                 }
 
                 if shouldStopMetadataSync() { break }
 
-                do {
-                    _ = try runSync { try await immichClient.updateAssetIfExists(assetId: mapping.immichAssetId, update: update) }
+                var assetUpdateOK = true
+                if hasUpdateFields {
+                    let updateSnapshot = update
+                    do {
+                        _ = try runSync { try await immichClient.updateAssetIfExists(assetId: mapping.immichAssetId, update: updateSnapshot) }
+                    } catch {
+                        assetUpdateOK = false
+                        metadataErrors += 1
+                        progressWrapped(.message("ERROR Metadata: sync failed for \(asset.localIdentifier): \(error)"))
+                    }
+                }
 
-                    // Update mapping with new signature
+                // Tag sync — best-effort, separate from asset metadata update.
+                var tagSyncOK = true
+                if needsTagSync {
+                    if !loadedExistingTags {
+                        loadedExistingTags = true
+                        do {
+                            let existing = try runSync { try await immichClient.listTags() }
+                            for t in existing {
+                                let n = (t.name ?? t.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !n.isEmpty { tagIdByName[n.lowercased()] = t.id }
+                            }
+                        } catch {
+                            progressWrapped(.message("WARN Metadata: could not list Immich tags: \(error)"))
+                        }
+                    }
+
+                    // Find names we don't yet have ids for and upsert them.
+                    let missing = assetKeywords.filter { tagIdByName[$0.lowercased()] == nil }
+                    if !missing.isEmpty {
+                        do {
+                            let created = try runSync { try await immichClient.upsertTags(names: missing) }
+                            for t in created {
+                                let n = (t.name ?? t.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !n.isEmpty { tagIdByName[n.lowercased()] = t.id }
+                            }
+                        } catch {
+                            tagSyncOK = false
+                            progressWrapped(.message("WARN Metadata: tag upsert failed for \(asset.localIdentifier): \(error)"))
+                        }
+                    }
+
+                    // Attach each tag to this asset.
+                    for name in assetKeywords {
+                        guard let tagId = tagIdByName[name.lowercased()] else { continue }
+                        do {
+                            try runSync { try await immichClient.addAssetsToTag(tagId: tagId, assetIds: [mapping.immichAssetId]) }
+                        } catch {
+                            tagSyncOK = false
+                            progressWrapped(.message("WARN Metadata: attach tag '\(name)' failed for \(asset.localIdentifier): \(error)"))
+                        }
+                    }
+                }
+
+                if assetUpdateOK && tagSyncOK {
+                    // Update mapping with new signature only if everything succeeded.
                     let updatedMapping = AssetMapping(
                         localIdentifier: mapping.localIdentifier,
                         immichAssetId: mapping.immichAssetId,
@@ -1916,11 +2400,9 @@ public final class PhotoBackupExporter {
                         lastSyncedAt: Date()
                     )
                     try? assetMappingStore.upsert(updatedMapping)
-
-                    metadataSynced += 1
-                } catch {
-                    metadataErrors += 1
-                    progressWrapped(.message("ERROR Metadata: sync failed for \(asset.localIdentifier): \(error)"))
+                    if hasUpdateFields || needsTagSync {
+                        metadataSynced += 1
+                    }
                 }
 
                 if shouldStopMetadataSync() { break }
@@ -1990,13 +2472,91 @@ func ymdFolder(for date: Date, calendar: Calendar) -> String {
     return String(format: "%04d/%02d/%02d", y, m, d)
 }
 
+/// Sanitize an album title so it is safe to use as a single path component on macOS filesystems.
+/// Replaces `/`, `:`, NUL, leading dots; trims whitespace.
+/// Returns `_Unsorted` if the cleaned name is empty.
+func sanitizeAlbumNameForFolder(_ raw: String) -> String {
+    var s = raw
+    // Replace path-hostile characters with underscore.
+    let bad: [Character] = ["/", ":", "\0", "\\"]
+    s = String(s.map { bad.contains($0) ? "_" : $0 })
+    // Trim whitespace.
+    s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+    // Strip leading dots so directories are not hidden / "." / "..".
+    while s.hasPrefix(".") {
+        s = String(s.dropFirst())
+    }
+    s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+    if s.isEmpty { return "_Unsorted" }
+    return s
+}
+
+/// Returns the sanitized titles of user-created albums that contain the given asset.
+/// System "smart" albums and other non-album collections are excluded.
+/// Returns an empty array if the asset is in no user album.
+func userAlbumFolderNames(for asset: PHAsset) -> [String] {
+    let collections = PHAssetCollection.fetchAssetCollectionsContaining(asset, with: .album, options: nil)
+    var names: [String] = []
+    var seen: Set<String> = []
+    collections.enumerateObjects { collection, _, _ in
+        // Only user-created albums (skip smart albums, shared cloud, etc. handled elsewhere).
+        guard collection.assetCollectionType == .album else { return }
+        let raw = (collection.localizedTitle ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let sanitized = sanitizeAlbumNameForFolder(raw)
+        if seen.insert(sanitized).inserted {
+            names.append(sanitized)
+        }
+    }
+    return names
+}
+
 func usableCaptureDate(_ date: Date?, calendar: Calendar) -> Date? {
     guard let date else { return nil }
     let year = calendar.component(.year, from: date)
     return year >= 1900 ? date : nil
 }
 
-func baseFilename(for date: Date?, localIdentifier: String, originalFilename: String? = nil, format: FilenameFormat = .dateAndId) -> String {
+/// Returns the originalFilename of the asset's primary photo/video resource,
+/// preferring the still or video before falling back to whatever resource exists
+/// (e.g. adjustment sidecars) so the resulting name reflects what the user sees
+/// in the Photos app rather than a sidecar's name.
+func primaryOriginalFilename(from resources: [PHAssetResource]) -> String? {
+    let preferredOrder: [PHAssetResourceType] = [
+        .photo, .fullSizePhoto,
+        .video, .fullSizeVideo,
+        .pairedVideo, .fullSizePairedVideo,
+        .audio
+    ]
+    for type in preferredOrder {
+        if let r = resources.first(where: { $0.type == type }), !r.originalFilename.isEmpty {
+            return r.originalFilename
+        }
+    }
+    return resources.first?.originalFilename
+}
+
+/// Sanitize a filename stem so it is safe to embed in an output path:
+/// strip path separators, NUL, control characters, trim whitespace,
+/// and cap length to keep total path components well under filesystem limits.
+/// Does not lowercase — original casing is preserved.
+func sanitizeOriginalNameStem(_ stem: String, maxLength: Int = 60) -> String {
+    var cleaned = stem.replacingOccurrences(of: "/", with: "_")
+    cleaned = cleaned.replacingOccurrences(of: "\\", with: "_")
+    cleaned = cleaned.replacingOccurrences(of: ":", with: "_")
+    cleaned = cleaned.replacingOccurrences(of: "\0", with: "")
+    // Strip ASCII control characters (0x00-0x1F and 0x7F).
+    cleaned = String(cleaned.unicodeScalars.filter { scalar in
+        let v = scalar.value
+        return !(v < 0x20 || v == 0x7F)
+    })
+    cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    if cleaned.count > maxLength {
+        cleaned = String(cleaned.prefix(maxLength))
+    }
+    return cleaned
+}
+
+func baseFilename(for date: Date?, localIdentifier: String, originalFilename: String? = nil, format: FilenameFormat = .dateAndOriginal) -> String {
     let id = makeAssetIdShort(localIdentifier)
     guard let date else { return "unknown_\(id)" }
     let df = DateFormatter()
@@ -2005,18 +2565,23 @@ func baseFilename(for date: Date?, localIdentifier: String, originalFilename: St
     df.dateFormat = "yyyy-MM-dd_HH-mm-ss"
     let dateStr = df.string(from: date)
 
-    let originalStem = originalFilename.map { ($0 as NSString).deletingPathExtension }
+    let originalStem: String? = {
+        guard let raw = originalFilename else { return nil }
+        let stem = (raw as NSString).deletingPathExtension
+        let cleaned = sanitizeOriginalNameStem(stem)
+        return cleaned.isEmpty ? nil : cleaned
+    }()
 
     switch format {
     case .dateAndId:
         return "\(dateStr)_\(id)"
     case .dateAndOriginal:
-        if let stem = originalStem, !stem.isEmpty {
+        if let stem = originalStem {
             return "\(dateStr)_\(stem)"
         }
         return "\(dateStr)_\(id)"
     case .originalOnly:
-        if let stem = originalStem, !stem.isEmpty {
+        if let stem = originalStem {
             return stem
         }
         return "\(dateStr)_\(id)"
@@ -2095,12 +2660,23 @@ public enum ExportOutcome: Sendable {
 func placeTempFile(
     tmpURL: URL,
     desiredURL: URL,
-    collisionPolicy: PhotoBackupOptions.CollisionPolicy
+    collisionPolicy: PhotoBackupOptions.CollisionPolicy,
+    copyInsteadOfMove: Bool = false
 ) throws -> ExportOutcome {
+    // Local helper that either moves or copies the source file, so both code paths
+    // (first-time write and rename-to-avoid-collision) share the same behavior.
+    func placeFile(from src: URL, to dst: URL) throws {
+        if copyInsteadOfMove {
+            try FileManager.default.copyItem(at: src, to: dst)
+        } else {
+            try atomicMove(from: src, to: dst)
+        }
+    }
+
     switch collisionPolicy {
     case .skipIdenticalElseRename:
         if !FileManager.default.fileExists(atPath: desiredURL.path) {
-            try atomicMove(from: tmpURL, to: desiredURL)
+            try placeFile(from: tmpURL, to: desiredURL)
             return .exported(url: desiredURL)
         }
 
@@ -2111,17 +2687,19 @@ func placeTempFile(
         } catch {
             // If we can't hash the existing file, fall back to renaming to avoid clobbering.
             let alt = uniqueURL(desiredURL)
-            try atomicMove(from: tmpURL, to: alt)
+            try placeFile(from: tmpURL, to: alt)
             return .exported(url: alt)
         }
 
         if tmpInfo.size == existingInfo.size, tmpInfo.hashHex == existingInfo.hashHex {
-            try? FileManager.default.removeItem(at: tmpURL)
+            if !copyInsteadOfMove {
+                try? FileManager.default.removeItem(at: tmpURL)
+            }
             return .skippedIdentical(existing: desiredURL)
         }
 
         let alt = uniqueURL(desiredURL)
-        try atomicMove(from: tmpURL, to: alt)
+        try placeFile(from: tmpURL, to: alt)
         return .exported(url: alt)
     }
 }
@@ -2214,7 +2792,8 @@ func exportResourceToTemp(
     dryRun: Bool,
     progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)? = nil,
     shouldStop: (() -> Bool)? = nil,
-    timeoutProvider: (() -> TimeInterval)? = nil
+    timeoutProvider: (() -> TimeInterval)? = nil,
+    cancellationRegistry: InFlightCancellationRegistry? = nil
 ) throws -> URL {
     if dryRun {
         return tempDir.appendingPathComponent("dryrun-\(UUID().uuidString)", isDirectory: false)
@@ -2236,24 +2815,29 @@ func exportResourceToTemp(
                 iCloudTimeoutMultiplier: iCloudTimeoutMultiplier,
                 progressCallback: progressCallback,
                 shouldStop: shouldStop,
-                timeoutProvider: timeoutProvider
+                timeoutProvider: timeoutProvider,
+                cancellationRegistry: cancellationRegistry
             )
             return tmpURL
         } catch {
             try? FileManager.default.removeItem(at: tmpURL)
             lastError = error
 
+            // If the user clicked Stop, the registry will have cancelled the
+            // PhotoKit request, surfacing as a generic Cocoa/PHPhotos error.
+            // Convert it into the 499 user-stop sentinel up-front so the
+            // per-asset catch blocks recognize it as a stop, not a failure.
+            if shouldStop?() == true || cancellationRegistry?.isCancelled() == true {
+                throw NSError(domain: "export", code: 499, userInfo: [
+                    NSLocalizedDescriptionKey: "Export stopped by user (\(filename))."
+                ])
+            }
+
             // Classify error and determine if retryable
             let classifiedError = classifyExportError(error, filename: filename)
 
             guard classifiedError.isRetryable, attempt < maxAttempts - 1 else {
                 throw classifiedError
-            }
-
-            if shouldStop?() == true {
-                throw NSError(domain: "export", code: 499, userInfo: [
-                    NSLocalizedDescriptionKey: "Export stopped by user (\(filename))."
-                ])
             }
 
             // Calculate delay and wait before retry
@@ -2278,7 +2862,8 @@ private func performSingleResourceExport(
     iCloudTimeoutMultiplier: Double,
     progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)?,
     shouldStop: (() -> Bool)? = nil,
-    timeoutProvider: (() -> TimeInterval)? = nil
+    timeoutProvider: (() -> TimeInterval)? = nil,
+    cancellationRegistry: InFlightCancellationRegistry? = nil
 ) throws {
     let sema = DispatchSemaphore(value: 0)
     var writeError: Error?
@@ -2293,10 +2878,46 @@ private func performSingleResourceExport(
         progressCallback?(progress, true)
     }
 
-    PHAssetResourceManager.default().writeData(for: resource, toFile: tmpURL, options: opts) { err in
-        writeError = err
-        sema.signal()
+    // We use `requestData` (rather than `writeData`) so we get a cancellable
+    // PHAssetResourceDataRequestID. We stream the chunks straight to disk so
+    // the on-disk semantics match what `writeData` would have given us.
+    FileManager.default.createFile(atPath: tmpURL.path, contents: nil)
+    let fileHandle: FileHandle
+    do {
+        fileHandle = try FileHandle(forWritingTo: tmpURL)
+    } catch {
+        throw error
     }
+
+    let writeQueue = DispatchQueue(label: "immibridge.resource-write")
+    var didFailWriting = false
+
+    let requestID = PHAssetResourceManager.default().requestData(
+        for: resource,
+        options: opts,
+        dataReceivedHandler: { chunk in
+            writeQueue.sync {
+                guard !didFailWriting else { return }
+                do {
+                    try fileHandle.write(contentsOf: chunk)
+                } catch {
+                    didFailWriting = true
+                    writeError = error
+                }
+            }
+        },
+        completionHandler: { err in
+            writeQueue.sync {
+                try? fileHandle.close()
+            }
+            if let err {
+                writeError = err
+            }
+            sema.signal()
+        }
+    )
+    cancellationRegistry?.registerResourceRequest(requestID)
+    defer { cancellationRegistry?.deregisterResourceRequest(requestID) }
 
     // Dynamic timeout - extend if iCloud download detected
     let checkInterval: TimeInterval = 1.0
@@ -2311,6 +2932,10 @@ private func performSingleResourceExport(
         elapsed += checkInterval
 
         if shouldStop?() == true {
+            // Cancel the underlying PhotoKit request so it actually gives up.
+            // The completion handler will still fire with an error; we throw
+            // the 499 sentinel ourselves so per-asset catches recognize it.
+            PHAssetResourceManager.default().cancelDataRequest(requestID)
             throw NSError(domain: "export", code: 499, userInfo: [
                 NSLocalizedDescriptionKey: "Export stopped by user (\(resource.originalFilename))."
             ])
@@ -2326,12 +2951,23 @@ private func performSingleResourceExport(
     }
 
     if elapsed >= effectiveTimeout {
+        // Make sure PhotoKit isn't still chewing on the request before we move on.
+        PHAssetResourceManager.default().cancelDataRequest(requestID)
         throw NSError(domain: "export", code: 408, userInfo: [
             NSLocalizedDescriptionKey: "Timed out exporting resource (\(resource.originalFilename))."
         ])
     }
 
     if let writeError {
+        // PhotoKit's cancellation surfaces as PHPhotosError or NSCocoaError.
+        // If the user requested stop, hand back the 499 sentinel so the
+        // per-asset catch treats it as a stop instead of an error.
+        if shouldStop?() == true || cancellationRegistry?.isCancelled() == true {
+            throw NSError(domain: "export", code: 499, userInfo: [
+                NSLocalizedDescriptionKey: "Export stopped by user (\(resource.originalFilename)).",
+                NSUnderlyingErrorKey: writeError
+            ])
+        }
         throw writeError
     }
 }
@@ -2346,7 +2982,8 @@ func exportEditedImageToTemp(
     dryRun: Bool,
     progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)? = nil,
     shouldStop: (() -> Bool)? = nil,
-    timeoutProvider: (() -> TimeInterval)? = nil
+    timeoutProvider: (() -> TimeInterval)? = nil,
+    cancellationRegistry: InFlightCancellationRegistry? = nil
 ) throws -> (tmpURL: URL, ext: String) {
     let filename = "edited image for \(asset.localIdentifier)"
     var lastError: Error?
@@ -2363,20 +3000,24 @@ func exportEditedImageToTemp(
                 dryRun: dryRun,
                 progressCallback: progressCallback,
                 shouldStop: shouldStop,
-                timeoutProvider: timeoutProvider
+                timeoutProvider: timeoutProvider,
+                cancellationRegistry: cancellationRegistry
             )
         } catch {
             lastError = error
+
+            // Stop-signaled cancellations should bypass retry classification
+            // and surface as the 499 user-stop sentinel.
+            if shouldStop?() == true || cancellationRegistry?.isCancelled() == true {
+                throw NSError(domain: "export", code: 499, userInfo: [
+                    NSLocalizedDescriptionKey: "Export stopped by user (\(filename))."
+                ])
+            }
+
             let classifiedError = classifyExportError(error, filename: filename)
 
             guard classifiedError.isRetryable, attempt < maxAttempts - 1 else {
                 throw classifiedError
-            }
-
-            if shouldStop?() == true {
-                throw NSError(domain: "export", code: 499, userInfo: [
-                    NSLocalizedDescriptionKey: "Export stopped by user (\(filename))."
-                ])
             }
 
             let delay = retryConfiguration.delay(forAttempt: attempt)
@@ -2400,7 +3041,8 @@ private func performSingleEditedImageExport(
     dryRun: Bool,
     progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)?,
     shouldStop: (() -> Bool)? = nil,
-    timeoutProvider: (() -> TimeInterval)? = nil
+    timeoutProvider: (() -> TimeInterval)? = nil,
+    cancellationRegistry: InFlightCancellationRegistry? = nil
 ) throws -> (tmpURL: URL, ext: String) {
     let sema = DispatchSemaphore(value: 0)
     var resultData: Data?
@@ -2419,7 +3061,7 @@ private func performSingleEditedImageExport(
         progressCallback?(progress, true)
     }
 
-    PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, uti, _, info in
+    let requestID = PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, uti, _, info in
         resultData = data
         resultUTI = uti
         if let err = info?[PHImageErrorKey] as? NSError {
@@ -2427,6 +3069,8 @@ private func performSingleEditedImageExport(
         }
         sema.signal()
     }
+    cancellationRegistry?.registerImageRequest(requestID)
+    defer { cancellationRegistry?.deregisterImageRequest(requestID) }
 
     // Dynamic timeout - extend if iCloud download detected
     let checkInterval: TimeInterval = 1.0
@@ -2441,6 +3085,8 @@ private func performSingleEditedImageExport(
         elapsed += checkInterval
 
         if shouldStop?() == true {
+            // Cancel the underlying PhotoKit request so it actually gives up.
+            PHImageManager.default().cancelImageRequest(requestID)
             throw NSError(domain: "export", code: 499, userInfo: [
                 NSLocalizedDescriptionKey: "Export stopped by user (edited image for \(asset.localIdentifier))."
             ])
@@ -2455,13 +3101,29 @@ private func performSingleEditedImageExport(
     }
 
     if elapsed >= effectiveTimeout {
+        PHImageManager.default().cancelImageRequest(requestID)
         throw NSError(domain: "edited", code: 408, userInfo: [
             NSLocalizedDescriptionKey: "Timed out rendering edited image."
         ])
     }
 
-    if let resultError { throw resultError }
+    if let resultError {
+        // PhotoKit cancellation surfaces as PHImageErrorKey from the request.
+        // Normalize to the 499 sentinel when the user pressed Stop.
+        if shouldStop?() == true || cancellationRegistry?.isCancelled() == true {
+            throw NSError(domain: "export", code: 499, userInfo: [
+                NSLocalizedDescriptionKey: "Export stopped by user (edited image for \(asset.localIdentifier)).",
+                NSUnderlyingErrorKey: resultError
+            ])
+        }
+        throw resultError
+    }
     guard let data = resultData else {
+        if shouldStop?() == true || cancellationRegistry?.isCancelled() == true {
+            throw NSError(domain: "export", code: 499, userInfo: [
+                NSLocalizedDescriptionKey: "Export stopped by user (edited image for \(asset.localIdentifier))."
+            ])
+        }
         throw ExportError.assetUnavailable(reason: "No data returned", filename: asset.localIdentifier)
     }
 
@@ -2490,8 +3152,17 @@ final class ImmichClient {
     private let apiBase: URL
     private let apiKey: String
     private let session: URLSession
+    /// Optional registry that lets the user's Stop click interrupt in-flight
+    /// uploads/JSON requests. Tasks are registered before await and removed
+    /// in defer so we never leak refs after completion.
+    private let cancellationRegistry: InFlightCancellationRegistry?
 
-    init(serverURL: URL, apiKey: String, session: URLSession = .shared) {
+    init(
+        serverURL: URL,
+        apiKey: String,
+        session: URLSession = .shared,
+        cancellationRegistry: InFlightCancellationRegistry? = nil
+    ) {
         if serverURL.lastPathComponent == "api" {
             self.apiBase = serverURL
         } else {
@@ -2499,6 +3170,7 @@ final class ImmichClient {
         }
         self.apiKey = apiKey
         self.session = session
+        self.cancellationRegistry = cancellationRegistry
     }
 
     func ping() async throws {
@@ -2551,25 +3223,25 @@ final class ImmichClient {
     }
 
     func getAssetIdByDeviceId(deviceId: String, deviceAssetId: String) async throws -> String? {
-        let candidatePaths = [
-            "assets/device/\(deviceId)/\(deviceAssetId)",
-            "assets/assetByDeviceId/\(deviceId)/\(deviceAssetId)"
+        let searchBody: [String: Any] = [
+            "deviceAssetId": deviceAssetId,
+            "deviceId": deviceId
         ]
-        for path in candidatePaths {
-            do {
-                let data = try await requestRaw(method: "GET", path: path, body: Optional<Data>.none)
-                if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let id = obj["id"] as? String {
-                    return id
-                }
-                struct AssetIdDto: Decodable { let id: String }
-                if let dto = try? JSONDecoder().decode(AssetIdDto.self, from: data) {
-                    return dto.id
-                }
-            } catch {
-                continue
+        let body = try JSONSerialization.data(withJSONObject: searchBody, options: [])
+
+        do {
+            let data = try await requestRaw(method: "POST", path: "search/metadata", body: body)
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let assets = obj["assets"] as? [String: Any],
+               let items = assets["items"] as? [[String: Any]],
+               let first = items.first,
+               let id = first["id"] as? String {
+                return id
             }
+        } catch {
+            print("getAssetIdByDeviceId search failed: \(error)")
         }
+
         return nil
     }
 
@@ -2581,7 +3253,7 @@ final class ImmichClient {
     // MARK: - Metadata Update
 
     /// Request body for PUT /assets/{id}
-    struct UpdateAssetDto: Encodable {
+    struct UpdateAssetDto: Encodable, Sendable {
         var dateTimeOriginal: String?
         var description: String?
         var isFavorite: Bool?
@@ -2672,6 +3344,42 @@ final class ImmichClient {
         }
     }
 
+    // MARK: - Tags
+
+    struct TagDto: Decodable {
+        let id: String
+        let name: String?
+        let value: String?
+    }
+
+    /// List all tags on the server.
+    func listTags() async throws -> [TagDto] {
+        try await requestJSON(method: "GET", path: "tags", body: Optional<Data>.none)
+    }
+
+    /// Create (or fetch existing) tags by name. Returns the created/found TagDto for each name.
+    /// Uses the Immich v2.5+ upsert endpoint: PUT /api/tags  body: { "tags": ["name1", ...] }
+    func upsertTags(names: [String]) async throws -> [TagDto] {
+        guard !names.isEmpty else { return [] }
+        let body = try JSONSerialization.data(withJSONObject: ["tags": names], options: [])
+        // Some Immich versions expose the upsert at PUT /tags, others at PUT /tags/upsert.
+        do {
+            return try await requestJSON(method: "PUT", path: "tags", body: body)
+        } catch {
+            // Fallback for older API surface
+            return try await requestJSON(method: "PUT", path: "tags/upsert", body: body)
+        }
+    }
+
+    /// Bulk-attach a single tag to many assets. Body: { "ids": [assetId, ...] }
+    /// Endpoint: PUT /api/tags/{tagId}/assets
+    func addAssetsToTag(tagId: String, assetIds: [String]) async throws {
+        guard !assetIds.isEmpty else { return }
+        let body = try JSONSerialization.data(withJSONObject: ["ids": assetIds], options: [])
+        _ = try await requestRaw(method: "PUT", path: "tags/\(tagId)/assets", body: body)
+    }
+
+
     func uploadAsset(
         fileURL: URL,
         sha1Hex: String?,
@@ -2723,7 +3431,7 @@ final class ImmichClient {
         req.setValue(String(contentLength), forHTTPHeaderField: "Content-Length")
         defer { try? FileManager.default.removeItem(at: tmpURL) }
 
-        let (data, response) = try await session.upload(for: req, fromFile: tmpURL)
+        let (data, response) = try await performUpload(request: req, fromFile: tmpURL)
         try ensureHTTP(response, data: data)
 
         let decoded = try JSONDecoder().decode(AssetUploadResponse.self, from: data)
@@ -2738,9 +3446,63 @@ final class ImmichClient {
             req.httpBody = body
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await session.data(for: req)
+        let (data, response) = try await performData(request: req)
         try ensureHTTP(response, data: data)
         return data
+    }
+
+    /// URLSession data wrapper that registers the underlying `URLSessionDataTask`
+    /// with the cancellation registry so the user's Stop click can abort it.
+    /// Falls back to `session.data(for:)` when no registry is wired.
+    private func performData(request: URLRequest) async throws -> (Data, URLResponse) {
+        guard let registry = cancellationRegistry else {
+            return try await session.data(for: request)
+        }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, URLResponse), Error>) in
+            // We have to declare `task` first so the completion handler can
+            // capture it by reference for deregister-on-completion.
+            var taskRef: URLSessionDataTask?
+            let task = session.dataTask(with: request) { data, response, error in
+                if let t = taskRef { registry.deregisterURLSessionTask(t) }
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard let data, let response else {
+                    continuation.resume(throwing: URLError(.badServerResponse))
+                    return
+                }
+                continuation.resume(returning: (data, response))
+            }
+            taskRef = task
+            registry.registerURLSessionTask(task)
+            task.resume()
+        }
+    }
+
+    /// URLSession upload wrapper, mirror of `performData` for multipart file uploads.
+    private func performUpload(request: URLRequest, fromFile fileURL: URL) async throws -> (Data, URLResponse) {
+        guard let registry = cancellationRegistry else {
+            return try await session.upload(for: request, fromFile: fileURL)
+        }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, URLResponse), Error>) in
+            var taskRef: URLSessionUploadTask?
+            let task = session.uploadTask(with: request, fromFile: fileURL) { data, response, error in
+                if let t = taskRef { registry.deregisterURLSessionTask(t) }
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard let data, let response else {
+                    continuation.resume(throwing: URLError(.badServerResponse))
+                    return
+                }
+                continuation.resume(returning: (data, response))
+            }
+            taskRef = task
+            registry.registerURLSessionTask(task)
+            task.resume()
+        }
     }
 
     private func requestJSON<T: Decodable>(method: String, path: String, body: Data?) async throws -> T {
@@ -3537,7 +4299,8 @@ private func exportResourceToOutputs(
     awaitImmichAssetId: Bool,
     onImmichAssetId: (@Sendable (String?) -> Void)? = nil,
     shouldStop: (() -> Bool)? = nil,
-    timeoutProvider: (() -> TimeInterval)? = nil
+    timeoutProvider: (() -> TimeInterval)? = nil,
+    cancellationRegistry: InFlightCancellationRegistry? = nil
 ) throws -> OutputsOutcome {
     let tmp = try exportResourceToTemp(
         resource,
@@ -3558,7 +4321,8 @@ private func exportResourceToOutputs(
             }
         },
         shouldStop: shouldStop,
-        timeoutProvider: timeoutProvider
+        timeoutProvider: timeoutProvider,
+        cancellationRegistry: cancellationRegistry
     )
 
     var uploadURL: URL = tmp
@@ -3623,7 +4387,8 @@ private func exportEditedImageToOutputs(
     progress: @escaping @Sendable (PhotoBackupProgress) -> Void,
     onImmichAssetId: (@Sendable (String?) -> Void)? = nil,
     shouldStop: (() -> Bool)? = nil,
-    timeoutProvider: (() -> TimeInterval)? = nil
+    timeoutProvider: (() -> TimeInterval)? = nil,
+    cancellationRegistry: InFlightCancellationRegistry? = nil
 ) throws -> OutputsOutcome {
     let (tmp, ext) = try exportEditedImageToTemp(
         asset: asset,
@@ -3644,7 +4409,8 @@ private func exportEditedImageToOutputs(
             }
         },
         shouldStop: shouldStop,
-        timeoutProvider: timeoutProvider
+        timeoutProvider: timeoutProvider,
+        cancellationRegistry: cancellationRegistry
     )
 
     let filename = "\(baseName)_edited.\(ext)"

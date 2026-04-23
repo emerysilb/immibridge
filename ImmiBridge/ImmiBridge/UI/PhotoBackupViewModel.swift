@@ -68,6 +68,27 @@ final class PhotoBackupViewModel: ObservableObject {
         }
     }
 
+    /// UI-facing enum for folder export organization. Mirrors `Core.FolderOrganization`.
+    enum FolderOrganizationUI: String, CaseIterable, Identifiable {
+        case byDate
+        case byAlbum
+        var id: String { rawValue }
+
+        var coreValue: FolderOrganization {
+            switch self {
+            case .byDate: return .byDate
+            case .byAlbum: return .byAlbum
+            }
+        }
+
+        var displayName: String {
+            switch self {
+            case .byDate: return "By Date (YYYY/MM/DD)"
+            case .byAlbum: return "By Album"
+            }
+        }
+    }
+
     struct AlbumRow: Identifiable, Hashable {
         var id: String { localIdentifier }
         let localIdentifier: String
@@ -98,6 +119,7 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published var destinationMode: DestinationMode = .immich
     @Published var sourceMode: SourceMode = .photos
     @Published var destinationPath: String = ""
+    @Published var folderOrganization: FolderOrganizationUI = .byDate
     @Published var mode: Mode = .originals
     @Published var media: Media = .all
     @Published var order: Order = .oldest
@@ -109,7 +131,7 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published var libraryScope: LibraryScope = .personalOnly
     @Published var includeAdjustmentData: Bool = true
     @Published var includeHiddenPhotos: Bool = false
-    @Published var filenameFormat: FilenameFormat = .dateAndId
+    @Published var filenameFormat: FilenameFormat = .dateAndOriginal
     @Published var allowNetwork: Bool = true
     @Published var dryRun: Bool = false
     @Published var limit: Int? = nil
@@ -118,6 +140,8 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published var dateFilterEnabled: Bool = false
     @Published var filterStartDate: Date = Calendar.current.date(byAdding: .year, value: -1, to: Date()) ?? Date()
     @Published var filterEndDate: Date = Date()
+    @Published var useRelativeDateRange: Bool = false
+    @Published var relativeDaysBack: Int = 30
 
     @Published var immichServerURL: String = ""
     @Published var immichApiKey: String = ""
@@ -226,6 +250,10 @@ final class PhotoBackupViewModel: ObservableObject {
         }
         destinationPath = defaults.string(forKey: "destinationPath") ?? ""
         folderDestinationBookmark = defaults.data(forKey: "folderDestinationBookmark")
+        if let raw = defaults.string(forKey: "folderOrganization"),
+           let v = FolderOrganizationUI(rawValue: raw) {
+            folderOrganization = v
+        }
         if let raw = defaults.string(forKey: "albumSource"),
            let v = AlbumSource(rawValue: raw) {
             albumSource = v
@@ -261,6 +289,11 @@ final class PhotoBackupViewModel: ObservableObject {
         }
         if let ed = defaults.object(forKey: "filterEndDate") as? Date {
             filterEndDate = ed
+        }
+        filterEndDate = Date()  // Always default "To" to today
+        useRelativeDateRange = defaults.bool(forKey: "useRelativeDateRange")
+        if let days = defaults.object(forKey: "relativeDaysBack") as? Int, days > 0 {
+            relativeDaysBack = days
         }
         // Ensure start <= end after loading persisted values
         ensureDateOrder()
@@ -596,6 +629,7 @@ final class PhotoBackupViewModel: ObservableObject {
         defaults.set(media.rawValue, forKey: "media")
         defaults.set(order.rawValue, forKey: "order")
         defaults.set(destinationPath, forKey: "destinationPath")
+        defaults.set(folderOrganization.rawValue, forKey: "folderOrganization")
         defaults.set(backupMode.rawValue, forKey: "backupMode")
         defaults.set(libraryScope.rawValue, forKey: "libraryScope")
         defaults.set(includeAdjustmentData, forKey: "includeAdjustmentData")
@@ -613,6 +647,8 @@ final class PhotoBackupViewModel: ObservableObject {
         defaults.set(dateFilterEnabled, forKey: "dateFilterEnabled")
         defaults.set(filterStartDate, forKey: "filterStartDate")
         defaults.set(filterEndDate, forKey: "filterEndDate")
+        defaults.set(useRelativeDateRange, forKey: "useRelativeDateRange")
+        defaults.set(relativeDaysBack, forKey: "relativeDaysBack")
         keychain.set(immichApiKey, account: "immichApiKey")
 
         let sortOrder: PhotoBackupOptions.SortOrder = (order == .oldest) ? .oldestFirst : .newestFirst
@@ -691,6 +727,15 @@ final class PhotoBackupViewModel: ObservableObject {
                 return .selectedAlbums(localIdentifiers: Array(selectedAlbumIds))
             }
         }()
+        let computedStartDate: Date
+        let computedEndDate: Date
+        if useRelativeDateRange {
+            computedEndDate = Date()
+            computedStartDate = Calendar.current.date(byAdding: .day, value: -relativeDaysBack, to: computedEndDate) ?? computedEndDate
+        } else {
+            computedStartDate = filterStartDate
+            computedEndDate = filterEndDate
+        }
         let photoOptions = PhotoBackupOptions(
             folderExport: folderExport,
             immichUpload: immichUpload,
@@ -702,8 +747,8 @@ final class PhotoBackupViewModel: ObservableObject {
             sortOrder: sortOrder,
             limit: limit,
             dryRun: dryRun,
-            since: dateFilterEnabled ? Calendar.current.startOfDay(for: filterStartDate) : nil,
-            until: dateFilterEnabled ? Calendar.current.date(byAdding: DateComponents(day: 1, second: -1), to: Calendar.current.startOfDay(for: filterEndDate)) : nil,
+            since: dateFilterEnabled ? Calendar.current.startOfDay(for: computedStartDate) : nil,
+            until: dateFilterEnabled ? Calendar.current.date(byAdding: DateComponents(day: 1, second: -1), to: Calendar.current.startOfDay(for: computedEndDate)) : nil,
             albumScope: albumScope,
             libraryScope: libraryScope.coreValue,
             includeAdjustmentData: includeAdjustmentData,
@@ -711,7 +756,8 @@ final class PhotoBackupViewModel: ObservableObject {
             requestTimeoutSeconds: timeoutSeconds,
             collisionPolicy: .skipIdenticalElseRename,
             includeHiddenPhotos: includeHiddenPhotos,
-            filenameFormat: filenameFormat
+            filenameFormat: filenameFormat,
+            folderOrganization: folderOrganization.coreValue
         )
 
         // Capture references for the detached task
@@ -939,12 +985,19 @@ final class PhotoBackupViewModel: ObservableObject {
         isPaused = true
         statusText = "Stopping…"
         appendLog("Stop requested: will pause after current item to allow resume.")
+        // Interrupt any in-flight PhotoKit fetch or Immich URLSession task so we
+        // don't have to wait for the hung asset to time out naturally before
+        // the loop notices shouldStop is true.
+        exporter.cancelInFlight()
     }
 
     func pause() {
         runState.store(.paused)
         isPaused = true
         statusText = "Pausing…"
+        // Pause should also interrupt in-flight requests so the export thread
+        // returns control quickly instead of finishing the current download.
+        exporter.cancelInFlight()
     }
 
     func resume() {

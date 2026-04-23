@@ -376,6 +376,8 @@ final class BackupScheduler: ObservableObject {
         if skipOnBattery && !PowerManager.isOnACPower() {
             // Skip this backup, reschedule
             NotificationManager.shared.sendBackupSkipped(reason: "Mac is on battery power")
+            lastBackupDate = Date()  // Advance to break the overdue loop
+            saveSettings()
             reschedule()
             return
         }

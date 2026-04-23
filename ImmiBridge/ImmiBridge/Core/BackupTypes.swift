@@ -12,6 +12,15 @@ public enum BackupMode: String, Codable, Sendable {
     case mirror
 }
 
+/// How folder export should organize files into subdirectories within the destination.
+public enum FolderOrganization: String, Codable, Sendable, CaseIterable {
+    /// `<dest>/YYYY/MM/DD/<filename>` — original/default behavior.
+    case byDate
+    /// `<dest>/<sanitizedAlbumName>/<filename>` — one folder per user album.
+    /// Assets in multiple albums are copied into each. Assets in no user album go to `_Unsorted/`.
+    case byAlbum
+}
+
 public enum BackupSource: Codable, Sendable, Hashable {
     case photos
     case folder(url: URL)
