@@ -957,12 +957,19 @@ final class PhotoBackupViewModel: ObservableObject {
         isPaused = true
         statusText = "Stopping…"
         appendLog("Stop requested: will pause after current item to allow resume.")
+        // Interrupt any in-flight PhotoKit fetch or Immich URLSession task so we
+        // don't have to wait for the hung asset to time out naturally before
+        // the loop notices shouldStop is true.
+        exporter.cancelInFlight()
     }
 
     func pause() {
         runState.store(.paused)
         isPaused = true
         statusText = "Pausing…"
+        // Pause should also interrupt in-flight requests so the export thread
+        // returns control quickly instead of finishing the current download.
+        exporter.cancelInFlight()
     }
 
     func resume() {

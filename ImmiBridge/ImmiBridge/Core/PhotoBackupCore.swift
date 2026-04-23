@@ -110,6 +110,112 @@ public struct BackupSessionState: Codable, Sendable {
     }
 }
 
+// MARK: - In-Flight Cancellation Registry
+
+/// Tracks in-flight PhotoKit and URLSession requests so the user can interrupt
+/// a hung asset by clicking Stop. The orchestrator calls `cancelAll()` exactly
+/// once when the run state transitions to non-running; per-call register/deregister
+/// ensures we never cancel a request that has already finished.
+public final class InFlightCancellationRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var photoKitImageRequestIds: Set<Int32> = []
+    private var photoKitResourceRequestIds: Set<Int32> = []
+    // Weak refs would be nice, but URLSessionTask isn't NSObject-friendly for that.
+    // We hold strong refs and rely on deregister-on-completion to release.
+    private var urlSessionTasks: [ObjectIdentifier: URLSessionTask] = [:]
+    private var cancelled: Bool = false
+
+    public init() {}
+
+    /// Returns true if cancellation has already been signaled. New requests
+    /// can use this to avoid registering work that should not start.
+    public func isCancelled() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func registerImageRequest(_ id: Int32) {
+        lock.lock()
+        photoKitImageRequestIds.insert(id)
+        lock.unlock()
+    }
+
+    func deregisterImageRequest(_ id: Int32) {
+        lock.lock()
+        photoKitImageRequestIds.remove(id)
+        lock.unlock()
+    }
+
+    func registerResourceRequest(_ id: Int32) {
+        lock.lock()
+        photoKitResourceRequestIds.insert(id)
+        lock.unlock()
+    }
+
+    func deregisterResourceRequest(_ id: Int32) {
+        lock.lock()
+        photoKitResourceRequestIds.remove(id)
+        lock.unlock()
+    }
+
+    func registerURLSessionTask(_ task: URLSessionTask) {
+        lock.lock()
+        let alreadyCancelled = cancelled
+        if !alreadyCancelled {
+            urlSessionTasks[ObjectIdentifier(task)] = task
+        }
+        lock.unlock()
+        // If a Stop happened between the caller deciding to start and us holding
+        // the lock, cancel immediately so we don't leak a hung request.
+        if alreadyCancelled {
+            task.cancel()
+        }
+    }
+
+    func deregisterURLSessionTask(_ task: URLSessionTask) {
+        lock.lock()
+        urlSessionTasks.removeValue(forKey: ObjectIdentifier(task))
+        lock.unlock()
+    }
+
+    /// Cancels everything currently registered. Safe to call multiple times.
+    /// New work registered after this point will be cancelled immediately
+    /// in `registerURLSessionTask` (PhotoKit registrations don't have an
+    /// equivalent fast path; the per-asset shouldStop check covers them).
+    public func cancelAll() {
+        lock.lock()
+        cancelled = true
+        let imageIds = photoKitImageRequestIds
+        let resourceIds = photoKitResourceRequestIds
+        let tasks = Array(urlSessionTasks.values)
+        photoKitImageRequestIds.removeAll()
+        photoKitResourceRequestIds.removeAll()
+        urlSessionTasks.removeAll()
+        lock.unlock()
+
+        for id in imageIds {
+            PHImageManager.default().cancelImageRequest(id)
+        }
+        for id in resourceIds {
+            PHAssetResourceManager.default().cancelDataRequest(id)
+        }
+        for task in tasks {
+            task.cancel()
+        }
+    }
+
+    /// Re-arms the registry for a fresh run after cancellation.
+    func reset() {
+        lock.lock()
+        cancelled = false
+        photoKitImageRequestIds.removeAll()
+        photoKitResourceRequestIds.removeAll()
+        urlSessionTasks.removeAll()
+        lock.unlock()
+    }
+}
+
 public struct FolderExportOptions: Sendable {
     public var destination: URL
 
@@ -795,7 +901,21 @@ public func metadataChangedSinceLastSync(
 }
 
 public final class PhotoBackupExporter {
+    /// Registry of in-flight PhotoKit/URLSession requests for the current run.
+    /// `cancelInFlight()` interrupts whatever the worker threads are blocked on
+    /// so the user's Stop click takes effect immediately rather than waiting
+    /// for a hung asset to time out.
+    public let inFlightRegistry = InFlightCancellationRegistry()
+
     public init() {}
+
+    /// Forces all currently in-flight PhotoKit/URLSession requests to abort.
+    /// Call this from the UI when the user clicks Stop, in addition to flipping
+    /// the run state. Per-asset catch blocks convert the resulting errors to
+    /// user-stop entries so the existing logging remains accurate.
+    public func cancelInFlight() {
+        inFlightRegistry.cancelAll()
+    }
 
     public func requestPhotosAuthorization() -> PHAuthorizationStatus {
         let current = PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -831,6 +951,11 @@ public final class PhotoBackupExporter {
 
         try ensureDir(options.tempDir)
 
+        // Reset cancellation registry for a fresh run. Anything left over from a
+        // prior cancelled run would otherwise refuse to start new URLSession tasks.
+        inFlightRegistry.reset()
+        let registry = inFlightRegistry
+
         // Helper to check if cancelled (not paused)
         let shouldCancel: @Sendable () -> Bool = { runState() == .cancelled }
 
@@ -853,7 +978,12 @@ public final class PhotoBackupExporter {
             config.timeoutIntervalForResource = options.requestTimeoutSeconds
             config.httpMaximumConnectionsPerHost = immichUpload.uploadConcurrency
             let session = URLSession(configuration: config)
-            let client = ImmichClient(serverURL: immichUpload.serverURL, apiKey: immichUpload.apiKey, session: session)
+            let client = ImmichClient(
+                serverURL: immichUpload.serverURL,
+                apiKey: immichUpload.apiKey,
+                session: session,
+                cancellationRegistry: registry
+            )
             immichClient = client
             immichPipeline = ImmichUploadPipeline(
                 immich: immichUpload,
@@ -1534,7 +1664,8 @@ public final class PhotoBackupExporter {
                                 awaitImmichAssetId: true,
                                 onImmichAssetId: onImmichAssetId,
                                 shouldStop: shouldStop,
-                                timeoutProvider: timeoutProvider
+                                timeoutProvider: timeoutProvider,
+                                cancellationRegistry: registry
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             livePhotoVideoId = outcome.immichAssetId
@@ -1572,7 +1703,8 @@ public final class PhotoBackupExporter {
                                 awaitImmichAssetId: false,
                                 onImmichAssetId: onImmichAssetId,
                                 shouldStop: shouldStop,
-                                timeoutProvider: timeoutProvider
+                                timeoutProvider: timeoutProvider,
+                                cancellationRegistry: registry
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
@@ -1610,7 +1742,8 @@ public final class PhotoBackupExporter {
                                 awaitImmichAssetId: false,
                                 onImmichAssetId: onImmichAssetId,
                                 shouldStop: shouldStop,
-                                timeoutProvider: timeoutProvider
+                                timeoutProvider: timeoutProvider,
+                                cancellationRegistry: registry
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
@@ -1648,7 +1781,8 @@ public final class PhotoBackupExporter {
                                 awaitImmichAssetId: false,
                                 onImmichAssetId: onImmichAssetId,
                                 shouldStop: shouldStop,
-                                timeoutProvider: timeoutProvider
+                                timeoutProvider: timeoutProvider,
+                                cancellationRegistry: registry
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
@@ -1699,7 +1833,8 @@ public final class PhotoBackupExporter {
                                     progress: progressWrapped,
                                     onImmichAssetId: onImmichAssetId,
                                     shouldStop: shouldStop,
-                                    timeoutProvider: timeoutProvider
+                                    timeoutProvider: timeoutProvider,
+                                    cancellationRegistry: registry
                                 )
                                 if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                                 if let folderOutcome = outcome.folderOutcome {
@@ -1729,7 +1864,8 @@ public final class PhotoBackupExporter {
                                 progress: progressWrapped,
                                 onImmichAssetId: onImmichAssetId,
                                 shouldStop: shouldStop,
-                                timeoutProvider: timeoutProvider
+                                timeoutProvider: timeoutProvider,
+                                cancellationRegistry: registry
                             )
                             if let folderOutcome = outcome.folderOutcome, case .exported = folderOutcome { assetAllSkipped = false }
                             if let folderOutcome = outcome.folderOutcome {
@@ -2471,7 +2607,8 @@ func exportResourceToTemp(
     dryRun: Bool,
     progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)? = nil,
     shouldStop: (() -> Bool)? = nil,
-    timeoutProvider: (() -> TimeInterval)? = nil
+    timeoutProvider: (() -> TimeInterval)? = nil,
+    cancellationRegistry: InFlightCancellationRegistry? = nil
 ) throws -> URL {
     if dryRun {
         return tempDir.appendingPathComponent("dryrun-\(UUID().uuidString)", isDirectory: false)
@@ -2493,24 +2630,29 @@ func exportResourceToTemp(
                 iCloudTimeoutMultiplier: iCloudTimeoutMultiplier,
                 progressCallback: progressCallback,
                 shouldStop: shouldStop,
-                timeoutProvider: timeoutProvider
+                timeoutProvider: timeoutProvider,
+                cancellationRegistry: cancellationRegistry
             )
             return tmpURL
         } catch {
             try? FileManager.default.removeItem(at: tmpURL)
             lastError = error
 
+            // If the user clicked Stop, the registry will have cancelled the
+            // PhotoKit request, surfacing as a generic Cocoa/PHPhotos error.
+            // Convert it into the 499 user-stop sentinel up-front so the
+            // per-asset catch blocks recognize it as a stop, not a failure.
+            if shouldStop?() == true || cancellationRegistry?.isCancelled() == true {
+                throw NSError(domain: "export", code: 499, userInfo: [
+                    NSLocalizedDescriptionKey: "Export stopped by user (\(filename))."
+                ])
+            }
+
             // Classify error and determine if retryable
             let classifiedError = classifyExportError(error, filename: filename)
 
             guard classifiedError.isRetryable, attempt < maxAttempts - 1 else {
                 throw classifiedError
-            }
-
-            if shouldStop?() == true {
-                throw NSError(domain: "export", code: 499, userInfo: [
-                    NSLocalizedDescriptionKey: "Export stopped by user (\(filename))."
-                ])
             }
 
             // Calculate delay and wait before retry
@@ -2535,7 +2677,8 @@ private func performSingleResourceExport(
     iCloudTimeoutMultiplier: Double,
     progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)?,
     shouldStop: (() -> Bool)? = nil,
-    timeoutProvider: (() -> TimeInterval)? = nil
+    timeoutProvider: (() -> TimeInterval)? = nil,
+    cancellationRegistry: InFlightCancellationRegistry? = nil
 ) throws {
     let sema = DispatchSemaphore(value: 0)
     var writeError: Error?
@@ -2550,10 +2693,46 @@ private func performSingleResourceExport(
         progressCallback?(progress, true)
     }
 
-    PHAssetResourceManager.default().writeData(for: resource, toFile: tmpURL, options: opts) { err in
-        writeError = err
-        sema.signal()
+    // We use `requestData` (rather than `writeData`) so we get a cancellable
+    // PHAssetResourceDataRequestID. We stream the chunks straight to disk so
+    // the on-disk semantics match what `writeData` would have given us.
+    FileManager.default.createFile(atPath: tmpURL.path, contents: nil)
+    let fileHandle: FileHandle
+    do {
+        fileHandle = try FileHandle(forWritingTo: tmpURL)
+    } catch {
+        throw error
     }
+
+    let writeQueue = DispatchQueue(label: "immibridge.resource-write")
+    var didFailWriting = false
+
+    let requestID = PHAssetResourceManager.default().requestData(
+        for: resource,
+        options: opts,
+        dataReceivedHandler: { chunk in
+            writeQueue.sync {
+                guard !didFailWriting else { return }
+                do {
+                    try fileHandle.write(contentsOf: chunk)
+                } catch {
+                    didFailWriting = true
+                    writeError = error
+                }
+            }
+        },
+        completionHandler: { err in
+            writeQueue.sync {
+                try? fileHandle.close()
+            }
+            if let err {
+                writeError = err
+            }
+            sema.signal()
+        }
+    )
+    cancellationRegistry?.registerResourceRequest(requestID)
+    defer { cancellationRegistry?.deregisterResourceRequest(requestID) }
 
     // Dynamic timeout - extend if iCloud download detected
     let checkInterval: TimeInterval = 1.0
@@ -2568,6 +2747,10 @@ private func performSingleResourceExport(
         elapsed += checkInterval
 
         if shouldStop?() == true {
+            // Cancel the underlying PhotoKit request so it actually gives up.
+            // The completion handler will still fire with an error; we throw
+            // the 499 sentinel ourselves so per-asset catches recognize it.
+            PHAssetResourceManager.default().cancelDataRequest(requestID)
             throw NSError(domain: "export", code: 499, userInfo: [
                 NSLocalizedDescriptionKey: "Export stopped by user (\(resource.originalFilename))."
             ])
@@ -2583,12 +2766,23 @@ private func performSingleResourceExport(
     }
 
     if elapsed >= effectiveTimeout {
+        // Make sure PhotoKit isn't still chewing on the request before we move on.
+        PHAssetResourceManager.default().cancelDataRequest(requestID)
         throw NSError(domain: "export", code: 408, userInfo: [
             NSLocalizedDescriptionKey: "Timed out exporting resource (\(resource.originalFilename))."
         ])
     }
 
     if let writeError {
+        // PhotoKit's cancellation surfaces as PHPhotosError or NSCocoaError.
+        // If the user requested stop, hand back the 499 sentinel so the
+        // per-asset catch treats it as a stop instead of an error.
+        if shouldStop?() == true || cancellationRegistry?.isCancelled() == true {
+            throw NSError(domain: "export", code: 499, userInfo: [
+                NSLocalizedDescriptionKey: "Export stopped by user (\(resource.originalFilename)).",
+                NSUnderlyingErrorKey: writeError
+            ])
+        }
         throw writeError
     }
 }
@@ -2603,7 +2797,8 @@ func exportEditedImageToTemp(
     dryRun: Bool,
     progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)? = nil,
     shouldStop: (() -> Bool)? = nil,
-    timeoutProvider: (() -> TimeInterval)? = nil
+    timeoutProvider: (() -> TimeInterval)? = nil,
+    cancellationRegistry: InFlightCancellationRegistry? = nil
 ) throws -> (tmpURL: URL, ext: String) {
     let filename = "edited image for \(asset.localIdentifier)"
     var lastError: Error?
@@ -2620,20 +2815,24 @@ func exportEditedImageToTemp(
                 dryRun: dryRun,
                 progressCallback: progressCallback,
                 shouldStop: shouldStop,
-                timeoutProvider: timeoutProvider
+                timeoutProvider: timeoutProvider,
+                cancellationRegistry: cancellationRegistry
             )
         } catch {
             lastError = error
+
+            // Stop-signaled cancellations should bypass retry classification
+            // and surface as the 499 user-stop sentinel.
+            if shouldStop?() == true || cancellationRegistry?.isCancelled() == true {
+                throw NSError(domain: "export", code: 499, userInfo: [
+                    NSLocalizedDescriptionKey: "Export stopped by user (\(filename))."
+                ])
+            }
+
             let classifiedError = classifyExportError(error, filename: filename)
 
             guard classifiedError.isRetryable, attempt < maxAttempts - 1 else {
                 throw classifiedError
-            }
-
-            if shouldStop?() == true {
-                throw NSError(domain: "export", code: 499, userInfo: [
-                    NSLocalizedDescriptionKey: "Export stopped by user (\(filename))."
-                ])
             }
 
             let delay = retryConfiguration.delay(forAttempt: attempt)
@@ -2657,7 +2856,8 @@ private func performSingleEditedImageExport(
     dryRun: Bool,
     progressCallback: ((_ progress: Double, _ isICloud: Bool) -> Void)?,
     shouldStop: (() -> Bool)? = nil,
-    timeoutProvider: (() -> TimeInterval)? = nil
+    timeoutProvider: (() -> TimeInterval)? = nil,
+    cancellationRegistry: InFlightCancellationRegistry? = nil
 ) throws -> (tmpURL: URL, ext: String) {
     let sema = DispatchSemaphore(value: 0)
     var resultData: Data?
@@ -2676,7 +2876,7 @@ private func performSingleEditedImageExport(
         progressCallback?(progress, true)
     }
 
-    PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, uti, _, info in
+    let requestID = PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, uti, _, info in
         resultData = data
         resultUTI = uti
         if let err = info?[PHImageErrorKey] as? NSError {
@@ -2684,6 +2884,8 @@ private func performSingleEditedImageExport(
         }
         sema.signal()
     }
+    cancellationRegistry?.registerImageRequest(requestID)
+    defer { cancellationRegistry?.deregisterImageRequest(requestID) }
 
     // Dynamic timeout - extend if iCloud download detected
     let checkInterval: TimeInterval = 1.0
@@ -2698,6 +2900,8 @@ private func performSingleEditedImageExport(
         elapsed += checkInterval
 
         if shouldStop?() == true {
+            // Cancel the underlying PhotoKit request so it actually gives up.
+            PHImageManager.default().cancelImageRequest(requestID)
             throw NSError(domain: "export", code: 499, userInfo: [
                 NSLocalizedDescriptionKey: "Export stopped by user (edited image for \(asset.localIdentifier))."
             ])
@@ -2712,13 +2916,29 @@ private func performSingleEditedImageExport(
     }
 
     if elapsed >= effectiveTimeout {
+        PHImageManager.default().cancelImageRequest(requestID)
         throw NSError(domain: "edited", code: 408, userInfo: [
             NSLocalizedDescriptionKey: "Timed out rendering edited image."
         ])
     }
 
-    if let resultError { throw resultError }
+    if let resultError {
+        // PhotoKit cancellation surfaces as PHImageErrorKey from the request.
+        // Normalize to the 499 sentinel when the user pressed Stop.
+        if shouldStop?() == true || cancellationRegistry?.isCancelled() == true {
+            throw NSError(domain: "export", code: 499, userInfo: [
+                NSLocalizedDescriptionKey: "Export stopped by user (edited image for \(asset.localIdentifier)).",
+                NSUnderlyingErrorKey: resultError
+            ])
+        }
+        throw resultError
+    }
     guard let data = resultData else {
+        if shouldStop?() == true || cancellationRegistry?.isCancelled() == true {
+            throw NSError(domain: "export", code: 499, userInfo: [
+                NSLocalizedDescriptionKey: "Export stopped by user (edited image for \(asset.localIdentifier))."
+            ])
+        }
         throw ExportError.assetUnavailable(reason: "No data returned", filename: asset.localIdentifier)
     }
 
@@ -2747,8 +2967,17 @@ final class ImmichClient {
     private let apiBase: URL
     private let apiKey: String
     private let session: URLSession
+    /// Optional registry that lets the user's Stop click interrupt in-flight
+    /// uploads/JSON requests. Tasks are registered before await and removed
+    /// in defer so we never leak refs after completion.
+    private let cancellationRegistry: InFlightCancellationRegistry?
 
-    init(serverURL: URL, apiKey: String, session: URLSession = .shared) {
+    init(
+        serverURL: URL,
+        apiKey: String,
+        session: URLSession = .shared,
+        cancellationRegistry: InFlightCancellationRegistry? = nil
+    ) {
         if serverURL.lastPathComponent == "api" {
             self.apiBase = serverURL
         } else {
@@ -2756,6 +2985,7 @@ final class ImmichClient {
         }
         self.apiKey = apiKey
         self.session = session
+        self.cancellationRegistry = cancellationRegistry
     }
 
     func ping() async throws {
@@ -3016,7 +3246,7 @@ final class ImmichClient {
         req.setValue(String(contentLength), forHTTPHeaderField: "Content-Length")
         defer { try? FileManager.default.removeItem(at: tmpURL) }
 
-        let (data, response) = try await session.upload(for: req, fromFile: tmpURL)
+        let (data, response) = try await performUpload(request: req, fromFile: tmpURL)
         try ensureHTTP(response, data: data)
 
         let decoded = try JSONDecoder().decode(AssetUploadResponse.self, from: data)
@@ -3031,9 +3261,63 @@ final class ImmichClient {
             req.httpBody = body
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await session.data(for: req)
+        let (data, response) = try await performData(request: req)
         try ensureHTTP(response, data: data)
         return data
+    }
+
+    /// URLSession data wrapper that registers the underlying `URLSessionDataTask`
+    /// with the cancellation registry so the user's Stop click can abort it.
+    /// Falls back to `session.data(for:)` when no registry is wired.
+    private func performData(request: URLRequest) async throws -> (Data, URLResponse) {
+        guard let registry = cancellationRegistry else {
+            return try await session.data(for: request)
+        }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, URLResponse), Error>) in
+            // We have to declare `task` first so the completion handler can
+            // capture it by reference for deregister-on-completion.
+            var taskRef: URLSessionDataTask?
+            let task = session.dataTask(with: request) { data, response, error in
+                if let t = taskRef { registry.deregisterURLSessionTask(t) }
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard let data, let response else {
+                    continuation.resume(throwing: URLError(.badServerResponse))
+                    return
+                }
+                continuation.resume(returning: (data, response))
+            }
+            taskRef = task
+            registry.registerURLSessionTask(task)
+            task.resume()
+        }
+    }
+
+    /// URLSession upload wrapper, mirror of `performData` for multipart file uploads.
+    private func performUpload(request: URLRequest, fromFile fileURL: URL) async throws -> (Data, URLResponse) {
+        guard let registry = cancellationRegistry else {
+            return try await session.upload(for: request, fromFile: fileURL)
+        }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, URLResponse), Error>) in
+            var taskRef: URLSessionUploadTask?
+            let task = session.uploadTask(with: request, fromFile: fileURL) { data, response, error in
+                if let t = taskRef { registry.deregisterURLSessionTask(t) }
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard let data, let response else {
+                    continuation.resume(throwing: URLError(.badServerResponse))
+                    return
+                }
+                continuation.resume(returning: (data, response))
+            }
+            taskRef = task
+            registry.registerURLSessionTask(task)
+            task.resume()
+        }
     }
 
     private func requestJSON<T: Decodable>(method: String, path: String, body: Data?) async throws -> T {
@@ -3830,7 +4114,8 @@ private func exportResourceToOutputs(
     awaitImmichAssetId: Bool,
     onImmichAssetId: (@Sendable (String?) -> Void)? = nil,
     shouldStop: (() -> Bool)? = nil,
-    timeoutProvider: (() -> TimeInterval)? = nil
+    timeoutProvider: (() -> TimeInterval)? = nil,
+    cancellationRegistry: InFlightCancellationRegistry? = nil
 ) throws -> OutputsOutcome {
     let tmp = try exportResourceToTemp(
         resource,
@@ -3851,7 +4136,8 @@ private func exportResourceToOutputs(
             }
         },
         shouldStop: shouldStop,
-        timeoutProvider: timeoutProvider
+        timeoutProvider: timeoutProvider,
+        cancellationRegistry: cancellationRegistry
     )
 
     var uploadURL: URL = tmp
@@ -3916,7 +4202,8 @@ private func exportEditedImageToOutputs(
     progress: @escaping @Sendable (PhotoBackupProgress) -> Void,
     onImmichAssetId: (@Sendable (String?) -> Void)? = nil,
     shouldStop: (() -> Bool)? = nil,
-    timeoutProvider: (() -> TimeInterval)? = nil
+    timeoutProvider: (() -> TimeInterval)? = nil,
+    cancellationRegistry: InFlightCancellationRegistry? = nil
 ) throws -> OutputsOutcome {
     let (tmp, ext) = try exportEditedImageToTemp(
         asset: asset,
@@ -3937,7 +4224,8 @@ private func exportEditedImageToOutputs(
             }
         },
         shouldStop: shouldStop,
-        timeoutProvider: timeoutProvider
+        timeoutProvider: timeoutProvider,
+        cancellationRegistry: cancellationRegistry
     )
 
     let filename = "\(baseName)_edited.\(ext)"
