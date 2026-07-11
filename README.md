@@ -1,3 +1,35 @@
+
+<div align="right">
+  <details>
+    <summary >🌐 Language</summary>
+    <div>
+      <div align="center">
+        <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=en">English</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=zh-CN">简体中文</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=zh-TW">繁體中文</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=ja">日本語</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=ko">한국어</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=hi">हिन्दी</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=th">ไทย</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=fr">Français</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=de">Deutsch</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=es">Español</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=it">Italiano</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=ru">Русский</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=pt">Português</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=nl">Nederlands</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=pl">Polski</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=ar">العربية</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=fa">فارسی</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=tr">Türkçe</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=vi">Tiếng Việt</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=id">Bahasa Indonesia</a>
+        | <a href="https://openaitx.github.io/view.html?user=emerysilb&project=immibridge&lang=as">অসমীয়া</
+      </div>
+    </div>
+  </details>
+</div>
+
 <p align="center">
   <img src="./assets/icon-transparent.png" alt="ImmiBridge" width="128">
 </p>
