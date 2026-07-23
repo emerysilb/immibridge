@@ -130,6 +130,10 @@ struct ContentView: View {
             model.refreshPhotosAuthorizationStatus()
             model.checkForResumableSession()
             model.setLogVisible(isLogDrawerOpen)
+            // Prime the Local Network TCC prompt early when a LAN Immich URL is configured.
+            if model.destinationMode == .immich || model.destinationMode == .both {
+                model.requestLocalNetworkPermission()
+            }
             scheduleImmichAutoTest()
             scheduler.bind(to: model)
         }
@@ -146,6 +150,9 @@ struct ContentView: View {
         }
         .alert("Immich Connection Failed", isPresented: $model.showImmichConnectionError) {
             if model.showLocalNetworkPermissionNeeded {
+                Button("Request Permission") {
+                    model.requestLocalNetworkPermission()
+                }
                 Button("Open System Settings") {
                     model.openLocalNetworkSettings()
                 }

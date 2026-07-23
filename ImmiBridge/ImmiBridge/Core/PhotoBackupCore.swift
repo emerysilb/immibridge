@@ -1330,8 +1330,8 @@ public final class PhotoBackupExporter {
                 }
 
                 let existing = immichPipeline.snapshotExistingDeviceAssetIds()
-                notes.append("Dry run uses Immich /assets/exist (device asset ids). Items uploaded from other devices/tools may still be detected as checksum-duplicates during a real run and be skipped.")
-                progressWrapped(.message("Dry run: Immich reports \(existing.count) existing device-asset id(s) for this deviceId"))
+                notes.append("Immich v3 removed device-id existence checks. Dry run cannot predict checksum duplicates without hashing each file; a real run skips duplicates via POST /assets/bulk-upload-check.")
+                progressWrapped(.message("Dry run: device-id exist cache has \(existing.count) id(s) (always empty on Immich v3+)"))
 
                 // Count planned outputs and whether each would be skipped/replaced, per the same deviceAssetId scheme
                 // the uploader uses (without exporting).
@@ -2217,27 +2217,9 @@ public final class PhotoBackupExporter {
                 // Check if we have a mapping for this asset
                 var mapping = assetMappingStore.get(localIdentifier: asset.localIdentifier)
 
-                // If no mapping exists, try to recover from Immich by device asset ID
-                if mapping == nil {
-                    let deviceAssetId = asset.localIdentifier
-                    do {
-                        if let immichAssetId = try runSync({ try await immichClient.getAssetIdByDeviceId(deviceId: immichUpload.deviceId, deviceAssetId: deviceAssetId) }) {
-                            // Create mapping for this asset
-                            let newMapping = AssetMapping(
-                                localIdentifier: asset.localIdentifier,
-                                immichAssetId: immichAssetId,
-                                deviceAssetId: deviceAssetId,
-                                lastSyncedSignature: "",  // Empty = needs sync
-                                lastSyncedAt: .distantPast
-                            )
-                            try? assetMappingStore.upsert(newMapping)
-                            mapping = newMapping
-                            metadataRecovered += 1
-                        }
-                    } catch {
-                        // Asset not in Immich yet, skip metadata sync
-                    }
-                }
+                // Immich v3 removed deviceId/deviceAssetId lookup. Recovery of pre-existing
+                // uploads without a local AssetMappingStore entry is no longer possible via API;
+                // mappings are created when ImmiBridge uploads (or from older mapping DBs).
 
                 guard let mapping = mapping else {
                     // No mapping = asset not in Immich, skip
@@ -2293,11 +2275,15 @@ public final class PhotoBackupExporter {
                     }
                 }
 
-                // Hidden/Archived - only update if different and (overwrite or Immich is false/nil)
-                let immichIsArchived = existingAsset?.isArchived ?? false
+                // Hidden/Archived - Immich v3 uses visibility (archive/timeline); v2 returned isArchived.
+                let immichIsArchived = existingAsset?.effectiveIsArchived ?? false
                 if currentMetadata.isHidden != immichIsArchived {
                     if overwrite || !immichIsArchived {
-                        update.isArchived = overwrite ? currentMetadata.isHidden : (currentMetadata.isHidden ? true : nil)
+                        if overwrite {
+                            update.setArchived(currentMetadata.isHidden)
+                        } else if currentMetadata.isHidden {
+                            update.setArchived(true)
+                        }
                     }
                 }
 
@@ -3185,11 +3171,13 @@ final class ImmichClient {
         try await requestJSON(method: "GET", path: "assets/statistics", body: Optional<Data>.none)
     }
 
+    /// Device-id existence checks were removed in Immich v3 (`POST /assets/exist`).
+    /// Always returns an empty set so callers fall through to checksum-based dedup
+    /// (`bulkUploadCheck`) or mapping-store lookups.
     func checkExistingAssets(deviceId: String, deviceAssetIds: [String]) async throws -> Set<String> {
-        let dto = CheckExistingAssetsDto(deviceId: deviceId, deviceAssetIds: deviceAssetIds)
-        let body = try JSONEncoder().encode(dto)
-        let resp: CheckExistingAssetsResponseDto = try await requestJSON(method: "POST", path: "assets/exist", body: body)
-        return Set(resp.existingIds)
+        _ = deviceId
+        _ = deviceAssetIds
+        return []
     }
 
     func bulkUploadCheck(items: [AssetBulkUploadCheckItem]) async throws -> [AssetBulkUploadCheckResult] {
@@ -3197,6 +3185,21 @@ final class ImmichClient {
         let body = try JSONEncoder().encode(dto)
         let resp: AssetBulkUploadCheckResponseDto = try await requestJSON(method: "POST", path: "assets/bulk-upload-check", body: body)
         return resp.results
+    }
+
+    /// Look up an existing asset by SHA1 checksum (hex or base64). Preferred on Immich v3+.
+    func getAssetIdByChecksum(_ checksum: String) async throws -> String? {
+        let searchBody: [String: Any] = ["checksum": checksum]
+        let body = try JSONSerialization.data(withJSONObject: searchBody, options: [])
+        let data = try await requestRaw(method: "POST", path: "search/metadata", body: body)
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let assets = obj["assets"] as? [String: Any],
+           let items = assets["items"] as? [[String: Any]],
+           let first = items.first,
+           let id = first["id"] as? String {
+            return id
+        }
+        return nil
     }
 
     struct AlbumDto: Decodable {
@@ -3222,26 +3225,11 @@ final class ImmichClient {
         }
     }
 
+    /// Immich v3 removed `deviceId` / `deviceAssetId` from assets and search.
+    /// This always returns nil; use `getAssetIdByChecksum`, bulk-upload-check, or AssetMappingStore.
     func getAssetIdByDeviceId(deviceId: String, deviceAssetId: String) async throws -> String? {
-        let searchBody: [String: Any] = [
-            "deviceAssetId": deviceAssetId,
-            "deviceId": deviceId
-        ]
-        let body = try JSONSerialization.data(withJSONObject: searchBody, options: [])
-
-        do {
-            let data = try await requestRaw(method: "POST", path: "search/metadata", body: body)
-            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let assets = obj["assets"] as? [String: Any],
-               let items = assets["items"] as? [[String: Any]],
-               let first = items.first,
-               let id = first["id"] as? String {
-                return id
-            }
-        } catch {
-            print("getAssetIdByDeviceId search failed: \(error)")
-        }
-
+        _ = deviceId
+        _ = deviceAssetId
         return nil
     }
 
@@ -3253,11 +3241,12 @@ final class ImmichClient {
     // MARK: - Metadata Update
 
     /// Request body for PUT /assets/{id}
+    /// Immich v3: `isArchived` was replaced by `visibility` (`archive` | `timeline` | `hidden` | `locked`).
     struct UpdateAssetDto: Encodable, Sendable {
         var dateTimeOriginal: String?
         var description: String?
         var isFavorite: Bool?
-        var isArchived: Bool?  // Maps to PHAsset.isHidden
+        var visibility: String?
         var latitude: Double?
         var longitude: Double?
         var rating: Int?  // -1 to 5
@@ -3266,7 +3255,7 @@ final class ImmichClient {
             dateTimeOriginal: String? = nil,
             description: String? = nil,
             isFavorite: Bool? = nil,
-            isArchived: Bool? = nil,
+            visibility: String? = nil,
             latitude: Double? = nil,
             longitude: Double? = nil,
             rating: Int? = nil
@@ -3274,16 +3263,21 @@ final class ImmichClient {
             self.dateTimeOriginal = dateTimeOriginal
             self.description = description
             self.isFavorite = isFavorite
-            self.isArchived = isArchived
+            self.visibility = visibility
             self.latitude = latitude
             self.longitude = longitude
             self.rating = rating
         }
 
+        /// Maps PHAsset.isHidden / archived intent onto Immich visibility.
+        mutating func setArchived(_ archived: Bool) {
+            visibility = archived ? "archive" : "timeline"
+        }
+
         /// Check if any fields are set (to avoid empty updates)
         var hasChanges: Bool {
             dateTimeOriginal != nil || description != nil || isFavorite != nil ||
-            isArchived != nil || latitude != nil || longitude != nil || rating != nil
+            visibility != nil || latitude != nil || longitude != nil || rating != nil
         }
     }
 
@@ -3292,6 +3286,7 @@ final class ImmichClient {
         let id: String
         let isFavorite: Bool?
         let isArchived: Bool?
+        let visibility: String?
         let latitude: Double?
         let longitude: Double?
         let dateTimeOriginal: String?
@@ -3308,6 +3303,12 @@ final class ImmichClient {
         var effectiveLatitude: Double? { latitude ?? exifInfo?.latitude }
         var effectiveLongitude: Double? { longitude ?? exifInfo?.longitude }
         var effectiveDateTimeOriginal: String? { dateTimeOriginal ?? exifInfo?.dateTimeOriginal }
+
+        /// True when asset is archived (v2 `isArchived` or v3 `visibility == "archive"`).
+        var effectiveIsArchived: Bool {
+            if let isArchived { return isArchived }
+            return visibility == "archive"
+        }
     }
 
     /// Fetch asset details from Immich
@@ -3393,14 +3394,19 @@ final class ImmichClient {
         livePhotoVideoId: String?,
         metadata: [[String: Any]]
     ) async throws -> ImmichUploadResult {
+        // deviceId / deviceAssetId kept in signature for call-site compatibility but are
+        // no longer sent: Immich v3 removed them from AssetMediaCreateDto.
+        _ = deviceId
+        _ = deviceAssetId
+
         var fields: [(String, String)] = []
-        fields.append(("deviceId", deviceId))
-        fields.append(("deviceAssetId", deviceAssetId))
         fields.append(("fileCreatedAt", iso8601(fileCreatedAt)))
         fields.append(("fileModifiedAt", iso8601(fileModifiedAt)))
         fields.append(("filename", filename))
+        // Immich v3: duration is integer milliseconds (not seconds).
         if let durationSeconds {
-            fields.append(("duration", String(durationSeconds)))
+            let ms = max(0, Int((durationSeconds * 1000.0).rounded()))
+            fields.append(("duration", String(ms)))
         }
         if let isFavorite {
             fields.append(("isFavorite", isFavorite ? "true" : "false"))
@@ -3599,100 +3605,26 @@ private final class ImmichUploadPipeline {
     }
 
 	            func submitExistChecks(deviceAssetIds: [String]) {
-	        if existSyncCompleted { return }
-	        guard !deviceAssetIds.isEmpty else { return }
-	        stateQueue.async {
-            if !self.didAnnounceBackgroundExist {
-                self.didAnnounceBackgroundExist = true
-                self.progress(.message("Immich: checking existing assets (background)..."))
-            }
-
-	            for id in deviceAssetIds {
-	                if self.knownDeviceAssetIds.contains(id) { continue }
-	                if self.existPendingSet.contains(id) { continue }
-	                self.existPendingSet.insert(id)
-	                self.existPendingFIFO.append(id)
-	            }
-	            self.reportExistProgressIfNeeded(force: false)
-	            self.scheduleExistFlushIfNeeded()
-	            self.maybeStartExistCheck()
-	        }
+	        // Immich v3: no device-id exist API. Checksum bulk-upload-check handles dedup.
+	        _ = deviceAssetIds
 	    }
 
 	    func performExistSyncBatches(batches: [(ids: [String], units: Int)], totalUnits: Int) throws {
-	        stateQueue.sync {
-	            existSyncCompleted = false
-	            didAnnounceBackgroundExist = true
-	        }
-	        progress(.message("Immich: syncing existing assets..."))
-	        progress(.immichExistingCheck(checked: 0, total: totalUnits))
-
-	        let maxConcurrent = max(1, min(immich.uploadConcurrency, 6))
-	        let limiter = DispatchSemaphore(value: maxConcurrent)
-	        let syncGroup = DispatchGroup()
-	        let checkedCounter = AtomicCounter()
-
-	        for batch in batches {
-	            if shouldCancel() { break }
-	            limiter.wait()
-	            syncGroup.enter()
-	            networkQueue.async { [weak self] in
-	                defer {
-	                    limiter.signal()
-	                    syncGroup.leave()
-	                }
-	                guard let self else { return }
-	                do {
-	                    let existing = try runSync {
-	                        try await self.client.checkExistingAssets(deviceId: self.immich.deviceId, deviceAssetIds: batch.ids)
-	                    }
-	                    self.stateQueue.sync {
-	                        self.knownDeviceAssetIds.formUnion(batch.ids)
-	                        self.existingDeviceAssetIds.formUnion(existing)
-	                        for id in batch.ids {
-	                            self.existPendingSet.remove(id)
-	                            if let waiters = self.existWaiters.removeValue(forKey: id) {
-	                                for s in waiters { s.signal() }
-	                            }
-	                        }
-	                    }
-	                } catch {
-	                    self.progress(.message("ERROR Immich: /assets/exist sync batch failed (\(batch.ids.count) ids): \(error)"))
-	                    self.stateQueue.sync {
-	                        self.knownDeviceAssetIds.formUnion(batch.ids)
-	                        for id in batch.ids {
-	                            self.existPendingSet.remove(id)
-	                            if let waiters = self.existWaiters.removeValue(forKey: id) {
-	                                for s in waiters { s.signal() }
-	                            }
-	                        }
-	                    }
-	                }
-
-	                checkedCounter.increment(by: batch.units)
-	                self.progress(.immichExistingCheck(checked: min(checkedCounter.value, totalUnits), total: totalUnits))
-	            }
-	        }
-
-	        syncGroup.wait()
+	        // Immich v3 removed POST /assets/exist. Skip device-id sync; checksum
+	        // bulk-upload-check handles duplicate detection during upload.
+	        _ = batches
 	        stateQueue.sync {
 	            existSyncCompleted = true
+	            didAnnounceBackgroundExist = true
 	        }
+	        progress(.message("Immich: skipping device-id exist sync (removed in Immich v3; using checksum dedup)"))
 	        progress(.immichExistingCheck(checked: totalUnits, total: totalUnits))
-	        progress(.message("Immich: exists sync complete"))
 	    }
 
 	    func preloadExisting(deviceAssetIds: [String]) throws {
-	        guard !deviceAssetIds.isEmpty else { return }
-	        let deviceId = immich.deviceId
-	        var out = Set<String>()
-	        out.reserveCapacity(deviceAssetIds.count)
-        for chunk in deviceAssetIds.chunked(into: immich.existBatchSize) {
-            if shouldCancel() { break }
-            let existing = try runSync { try await self.client.checkExistingAssets(deviceId: deviceId, deviceAssetIds: chunk) }
-            out.formUnion(existing)
-        }
-	        existingDeviceAssetIds = out
+	        // Immich v3: POST /assets/exist removed — nothing to preload by device id.
+	        _ = deviceAssetIds
+	        existingDeviceAssetIds = []
 	    }
 
 	    func snapshotExistingDeviceAssetIds() -> Set<String> {
@@ -3989,22 +3921,11 @@ private final class ImmichUploadPipeline {
                         }
 
                         if shouldReplaceExisting {
-                            do {
-                                let existingId = try runSync {
-                                    try await self.client.getAssetIdByDeviceId(
-                                        deviceId: self.immich.deviceId,
-                                        deviceAssetId: work.deviceAssetId
-                                    )
-                                }
-                                if let existingId {
-                                    self.progress(.message("Immich: replacing existing asset (\(work.deviceAssetId))"))
-                                    try runSync { try await self.client.deleteAssets(assetIds: [existingId]) }
-                                } else {
-                                    self.progress(.message("ERROR Immich: could not resolve existing asset id (\(work.deviceAssetId)); uploading may fail"))
-                                }
-                            } catch {
-                                self.progress(.message("ERROR Immich: could not delete existing asset (\(work.deviceAssetId)): \(error)"))
-                            }
+                            // Immich v3: no device-id lookup. When checksum differs the server
+                            // has no "same device asset" identity — upload as new (or rely on
+                            // AssetMappingStore from a prior upload). When checksum matches,
+                            // bulk-upload-check already rejected as duplicate above.
+                            self.progress(.message("Immich: update-changed has no device-id target on v3; uploading as new if checksum differs (\(work.deviceAssetId))"))
                         }
                         self.startUpload(work: work, sha1Hex: sha1)
                     }
@@ -4267,7 +4188,7 @@ private struct AssetUploadResponse: Decodable {
     let status: String
 }
 
-private func sha1HexFile(_ url: URL) throws -> String {
+func sha1HexFile(_ url: URL) throws -> String {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
     var hasher = Insecure.SHA1()

@@ -688,12 +688,13 @@ final class PhotoBackupViewModel: ObservableObject {
         switch destinationMode {
         case .immich, .both:
             if let url = URL(string: immichServerURL) {
-                let needsPrecheck = immichSyncAlbums || immichUpdateChangedAssets
+                // Immich v3 removed deviceId/deviceAssetId and POST /assets/exist.
+                // Always use SHA1 bulk-upload-check for duplicate detection.
                 immichUpload = ImmichUploadOptions(
                     serverURL: url,
                     apiKey: immichApiKey,
                     deviceId: immichDeviceId,
-                    checksumPrecheck: needsPrecheck,
+                    checksumPrecheck: true,
                     skipHash: false,          // Always hash for safe duplicate detection
                     uploadConcurrency: immichUploadConcurrency,
                     hashConcurrency: immichUploadConcurrency,
@@ -1066,6 +1067,11 @@ final class PhotoBackupViewModel: ObservableObject {
         }
     }
 
+    /// Ask macOS to show the Local Network privacy dialog (Bonjour browse).
+    func requestLocalNetworkPermission() {
+        LocalNetworkPermission.requestPrompt()
+    }
+
     func testImmich() {
         guard !immichServerURL.isEmpty, !immichApiKey.isEmpty else { return }
         immichTestStatus = "Testing…"
@@ -1087,12 +1093,28 @@ final class PhotoBackupViewModel: ObservableObject {
             showImmichConnectionError = true
             return
         }
+
+        // URLSession alone often fails with "Local network prohibited" without ever
+        // showing the TCC sheet. Kick Bonjour first when targeting a LAN host.
+        let isLocal = isLocalNetworkURL(immichServerURL)
+        if isLocal {
+            LocalNetworkPermission.requestPrompt()
+        }
+
         let apiKey = immichApiKey
         let apiBase = (base.lastPathComponent == "api") ? base : base.appendingPathComponent("api")
         var pingReq = URLRequest(url: apiBase.appendingPathComponent("server/ping"))
         pingReq.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        // Local LAN HTTP (http://192.168.x.x) is common for Immich; allow enough time
+        // for the user to answer the Local Network permission sheet on first try.
+        pingReq.timeoutInterval = isLocal ? 20 : 15
 
         Task.detached { [weak self] in
+            // Give TCC a moment to present the Local Network sheet before HTTP starts.
+            if isLocal {
+                try? await Task.sleep(nanoseconds: 800_000_000)
+            }
+
             var lastError: Error?
             for attempt in 1...3 {
                 do {
@@ -1109,25 +1131,14 @@ final class PhotoBackupViewModel: ObservableObject {
                         throw NSError(domain: "immich", code: (meResp as? HTTPURLResponse)?.statusCode ?? -2)
                     }
 
-                    // Also test /assets/exist latency (use a random id, should come back quickly).
-                    let deviceId = await MainActor.run { [weak self] in
-                        self?.immichDeviceId ?? "cli"
-                    }
-                    let probeId = "probe-\(UUID().uuidString)"
-                    let existBody: [String: Any] = [
-                        "deviceId": deviceId,
-                        "deviceAssetIds": [probeId]
-                    ]
-                    let existData = try JSONSerialization.data(withJSONObject: existBody, options: [])
-                    var existReq = URLRequest(url: apiBase.appendingPathComponent("assets/exist"))
-                    existReq.httpMethod = "POST"
-                    existReq.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-                    existReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    existReq.httpBody = existData
+                    // Probe an authenticated API that still exists on Immich v3+.
+                    // (POST /assets/exist was removed in Immich v3; dedup is checksum-based.)
+                    var statsReq = URLRequest(url: apiBase.appendingPathComponent("assets/statistics"))
+                    statsReq.setValue(apiKey, forHTTPHeaderField: "x-api-key")
                     let start = Date()
-                    let (_, existResp) = try await URLSession.shared.data(for: existReq)
-                    guard let http3 = existResp as? HTTPURLResponse, (200...299).contains(http3.statusCode) else {
-                        throw NSError(domain: "immich", code: (existResp as? HTTPURLResponse)?.statusCode ?? -3)
+                    let (_, statsResp) = try await URLSession.shared.data(for: statsReq)
+                    guard let http3 = statsResp as? HTTPURLResponse, (200...299).contains(http3.statusCode) else {
+                        throw NSError(domain: "immich", code: (statsResp as? HTTPURLResponse)?.statusCode ?? -3)
                     }
                     let ms = Int(Date().timeIntervalSince(start) * 1000)
 
@@ -1143,8 +1154,12 @@ final class PhotoBackupViewModel: ObservableObject {
                     if attempt < 3 {
                         await MainActor.run { [weak self] in
                             self?.immichTestStatus = "Testing… (\(attempt + 1)/3)"
+                            // Re-arm Bonjour browse between retries so a dismissed sheet can reappear.
+                            if isLocal {
+                                self?.requestLocalNetworkPermission()
+                            }
                         }
-                        try? await Task.sleep(nanoseconds: 600_000_000) // 0.6s
+                        try? await Task.sleep(nanoseconds: isLocal ? 1_200_000_000 : 600_000_000)
                         continue
                     }
                 }
@@ -1167,11 +1182,13 @@ final class PhotoBackupViewModel: ObservableObject {
                    self.isLocalNetworkPermissionError(error) {
                     self.showLocalNetworkPermissionNeeded = true
                     self.immichConnectionErrorMessage = """
-                        Could not connect to your local Immich server.
+                        Could not reach your Immich server on the local network.
 
-                        This may be because ImmiBridge needs permission to access your local network.
+                        macOS blocked Local Network access for this app.
 
-                        Please go to System Settings → Privacy & Security → Local Network and enable access for ImmiBridge, then try again.
+                        1. Click “Request Permission” below (or wait for a system dialog and press Allow).
+                        2. Or open System Settings → Privacy & Security → Local Network and turn ImmiBridge On.
+                        3. Click Try Again.
 
                         Error: \(errorText)
                         """
@@ -1241,6 +1258,7 @@ final class PhotoBackupViewModel: ObservableObject {
             // Only show errors in status text during Immich sync (progress row handles the rest)
             if msg.hasPrefix("ERROR Immich existing check failed")
                 || msg.hasPrefix("ERROR Immich: /assets/exist")
+                || msg.hasPrefix("ERROR Immich: bulk-upload-check")
                 || msg.hasPrefix("ERROR Immich: could not fetch statistics")
                 || msg.hasPrefix("ERROR Immich: exists sync failed")
             {
@@ -1727,10 +1745,18 @@ final class PhotoBackupViewModel: ObservableObject {
     /// Check if an error indicates local network permission was denied
     private func isLocalNetworkPermissionError(_ error: Error) -> Bool {
         let nsError = error as NSError
+        let full = String(describing: error).lowercased()
+
+        // Explicit TCC / path strings macOS puts in the underlying error.
+        if full.contains("local network prohibited")
+            || full.contains("local network") && full.contains("prohibited")
+            || full.contains("denied local network") {
+            return true
+        }
 
         // Network permission denied errors
         if nsError.domain == NSURLErrorDomain {
-            // -1009: The Internet connection appears to be offline
+            // -1009: The Internet connection appears to be offline (often means Local Network blocked)
             // -1004: Could not connect to the server
             // -1001: The request timed out
             if [-1009, -1004, -1001].contains(nsError.code) {
@@ -1749,8 +1775,15 @@ final class PhotoBackupViewModel: ObservableObject {
 
     func openLocalNetworkSettings() {
         // Open System Settings to Privacy & Security > Local Network
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork") {
-            NSWorkspace.shared.open(url)
+        // Prefer modern Settings deep link on Ventura+, fall back to legacy.
+        let candidates = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_LocalNetwork"
+        ]
+        for s in candidates {
+            if let url = URL(string: s), NSWorkspace.shared.open(url) {
+                return
+            }
         }
     }
 }

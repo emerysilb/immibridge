@@ -140,27 +140,7 @@ public final class FileImmichSyncer {
             return "file:\(file.relPath)"
         }
 
-        // Batch exist check
-        var existingIds = Set<String>()
-        let deviceIds = files.map { deviceAssetId(for: $0) }
-        if !deviceIds.isEmpty {
-            let batchSize = max(1, immich.existBatchSize)
-            var checked = 0
-            while checked < deviceIds.count {
-                if runState() == .cancelled { break }
-                let end = min(deviceIds.count, checked + batchSize)
-                let batch = Array(deviceIds[checked..<end])
-                do {
-                    let exist = try runSync { try await client.checkExistingAssets(deviceId: immich.deviceId, deviceAssetIds: batch) }
-                    existingIds.formUnion(exist)
-                } catch {
-                    progress(.message("ERROR Immich: /assets/exist failed for file sync: \(error)"))
-                }
-                checked = end
-                progress(.immichExistingCheck(checked: checked, total: deviceIds.count))
-            }
-        }
-
+        // Immich v3: device-id exist checks are gone. Dedup each file by SHA1 via bulk-upload-check.
         var uploaded = 0
         var skipped = 0
         var replaced = 0
@@ -173,30 +153,6 @@ public final class FileImmichSyncer {
             progress(.fileCopying(index: idx + 1, total: files.count, relativePath: file.relPath))
 
             let id = deviceAssetId(for: file)
-            if existingIds.contains(id) {
-                if options.updateChanged {
-                    do {
-                        if let immichId = try runSync({ try await client.getAssetIdByDeviceId(deviceId: immich.deviceId, deviceAssetId: id) }) {
-                            if !options.dryRun {
-                                try runSync({ try await client.deleteAssets(assetIds: [immichId]) })
-                            }
-                            replaced += 1
-                        } else {
-                            skipped += 1
-                            progress(.message("Immich: exists, skipping upload (\(id))"))
-                            continue
-                        }
-                    } catch {
-                        errors += 1
-                        progress(.message("ERROR Immich: failed to replace existing file \(file.relPath): \(error)"))
-                        continue
-                    }
-                } else {
-                    skipped += 1
-                    progress(.message("Immich: exists, skipping upload (\(id))"))
-                    continue
-                }
-            }
 
             if options.dryRun {
                 uploaded += 1
@@ -207,6 +163,20 @@ public final class FileImmichSyncer {
                 // iCloud Drive: download on demand; then best-effort re-evict.
                 try ensureUbiquitousItemIsDownloaded(file.url, timeoutSeconds: options.requestTimeoutSeconds)
                 let filename = file.url.lastPathComponent
+                let sha1 = try sha1HexFile(file.url)
+                let check = try runSync {
+                    try await client.bulkUploadCheck(items: [AssetBulkUploadCheckItem(checksum: sha1, id: id)])
+                }
+                if let result = check.first, result.action == "reject", result.reason == "duplicate" {
+                    // Same bytes already on server — skip (checksum match). Content-changed
+                    // files get a different hash and upload as new on Immich v3.
+                    _ = result.assetId
+                    _ = options.updateChanged
+                    skipped += 1
+                    progress(.message("Immich: duplicate, skipping upload (\(id))"))
+                    continue
+                }
+
                 let meta: [[String: Any]] = [[
                     "key": "mobile-app",
                     "value": [
@@ -221,7 +191,7 @@ public final class FileImmichSyncer {
                 _ = try runSync {
                     try await client.uploadAsset(
                         fileURL: file.url,
-                        sha1Hex: nil,
+                        sha1Hex: sha1,
                         deviceId: immich.deviceId,
                         deviceAssetId: id,
                         filename: filename,

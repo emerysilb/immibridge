@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UserNotifications
 
@@ -59,9 +60,31 @@ struct NotificationSettingsView: View {
                     )
                 }
 
+                Divider()
+                    .overlay(DesignSystem.Colors.separator)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Menu bar")
+                        .font(.system(.subheadline, design: .rounded).weight(.semibold))
+                        .foregroundStyle(DesignSystem.Colors.textSecondary)
+
+                    NotificationToggle(
+                        title: "Hide Dock Icon",
+                        description: "Run in the menu bar only. Close this window to leave backups running in the background.",
+                        isOn: hideDockIconBinding
+                    )
+                }
+
                 Spacer(minLength: 0)
             }
         }
+    }
+
+    private var hideDockIconBinding: Binding<Bool> {
+        Binding(
+            get: { AppDelegate.hideDockIcon },
+            set: { AppDelegate.hideDockIcon = $0 }
+        )
     }
 
     private var notificationBadge: StatusBadge {

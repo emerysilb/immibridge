@@ -45,6 +45,30 @@ struct SetupWizardView: View {
         }
         .frame(minWidth: 500, minHeight: 400)
         .preferredColorScheme(.dark)
+        .onChange(of: currentStep) { step in
+            // When the user reaches Immich setup, prime Local Network TCC.
+            if step == 2 {
+                model.requestLocalNetworkPermission()
+            }
+        }
+        .alert("Immich Connection Failed", isPresented: $model.showImmichConnectionError) {
+            if model.showLocalNetworkPermissionNeeded {
+                Button("Request Permission") {
+                    model.requestLocalNetworkPermission()
+                }
+                Button("Open System Settings") {
+                    model.openLocalNetworkSettings()
+                }
+                Button("Try Again") {
+                    model.testImmich()
+                }
+                Button("Cancel", role: .cancel) {}
+            } else {
+                Button("OK", role: .cancel) {}
+            }
+        } message: {
+            Text(model.immichConnectionErrorMessage)
+        }
     }
 
     // MARK: - Header

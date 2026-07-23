@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @available(macOS 12.0, *)
@@ -163,32 +164,12 @@ struct MenuBarView: View {
     }
 
     private func openMainWindow() {
-        // Prefer reusing an existing non-panel window (menu bar extra uses a panel).
-        if let existing = NSApp.windows.first(where: { !($0 is NSPanel) && $0.isVisible })
-            ?? NSApp.windows.first(where: { !($0 is NSPanel) })
-        {
-            NSApp.setActivationPolicy(.regular)
-            NSApp.activate(ignoringOtherApps: true)
-            existing.makeKeyAndOrderFront(nil)
+        // Always go through AppDelegate — it excludes NSStatusBarWindow and retains the UI window.
+        if let delegate = NSApp.delegate as? AppDelegate {
+            delegate.openMainWindow()
             return
         }
-
-        // Create a new main window if none exist (only available on macOS 13+).
-        // Post notification to request window opening (handled by WindowOpenerView)
         NotificationCenter.default.post(name: .openMainWindowRequested, object: nil)
-
-        // SwiftUI creates the window asynchronously; bring it to front once it exists.
-        Task { @MainActor in
-            for _ in 0..<20 {
-                if let w = NSApp.windows.first(where: { !($0 is NSPanel) }) {
-                    NSApp.setActivationPolicy(.regular)
-                    NSApp.activate(ignoringOtherApps: true)
-                    w.makeKeyAndOrderFront(nil)
-                    return
-                }
-                try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
-            }
-        }
     }
 }
 
@@ -207,7 +188,9 @@ struct WindowOpenerView: View {
         Color.clear
             .frame(width: 0, height: 0)
             .onReceive(NotificationCenter.default.publisher(for: .openMainWindowRequested)) { _ in
-                NSApp.setActivationPolicy(.regular)
+                if !AppDelegate.hideDockIcon {
+                    NSApp.setActivationPolicy(.regular)
+                }
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "main")
             }
