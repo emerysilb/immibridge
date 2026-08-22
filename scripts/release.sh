@@ -34,6 +34,62 @@ DMG_X86_64_PATH="$ROOT_DIR/build/ImmiBridge-${VERSION}-x86_64.dmg"
 SPARKLE_TOOLS_DIR="${SPARKLE_TOOLS_DIR:-$ROOT_DIR/tools/sparkle/bin}"
 # Set to "universal" for single universal binary, "separate" for arch-specific DMGs
 BUILD_MODE="${BUILD_MODE:-universal}"
+APPCAST_PATH="${APPCAST_PATH:-$ROOT_DIR/docs/appcast.xml}"
+PLIST_PATH="$ROOT_DIR/ImmiBridge/ImmiBridge/UI/Info.plist"
+
+# Sparkle compares CFBundleVersion -- NOT the marketing version -- to decide whether an
+# update exists. Ship 1.1.0 with the same CFBundleVersion as 1.0.11 and the release
+# builds, signs, notarizes and uploads perfectly, and no existing user is ever offered
+# it. Nothing errors. So derive it here rather than trusting anyone to remember.
+#
+# Override with BUILD_NUMBER=n for a re-release of the same build.
+resolve_build_number() {
+    if [[ -n "${BUILD_NUMBER:-}" ]]; then
+        echo "$BUILD_NUMBER"
+        return
+    fi
+
+    local current last
+    current="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST_PATH" 2>/dev/null || echo 0)"
+    [[ "$current" =~ ^[0-9]+$ ]] || current=0
+
+    last=0
+    if [[ -f "$APPCAST_PATH" ]]; then
+        last="$(grep -oE '<sparkle:version>[0-9]+' "$APPCAST_PATH" \
+                | grep -oE '[0-9]+' | sort -n | tail -1)"
+        [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    fi
+
+    # Respect a deliberate manual bump; otherwise take the next one past the last
+    # published release.
+    if (( current > last )); then
+        echo "$current"
+    else
+        echo $(( last + 1 ))
+    fi
+}
+
+preflight() {
+    echo "==> Preflight..."
+
+    # An "Apple Development" cert builds and runs locally but fails notarization, and
+    # Sparkle refuses an update whose signing identity does not match the installed app.
+    if [[ "$CODESIGN_IDENTITY" != *"Developer ID Application"* ]]; then
+        echo "ERROR: CODESIGN_IDENTITY is '${CODESIGN_IDENTITY}'."
+        echo "       Releases must use a 'Developer ID Application' certificate."
+        exit 1
+    fi
+
+    if [[ -f "$APPCAST_PATH" ]] && grep -q "<sparkle:shortVersionString>${VERSION}<" "$APPCAST_PATH"; then
+        echo "WARNING: ${VERSION} is already present in $APPCAST_PATH."
+        echo "         Continuing will replace that entry. Set BUILD_NUMBER explicitly if"
+        echo "         you mean to re-release."
+    fi
+
+    echo "    version:      ${VERSION}"
+    echo "    build number: ${BUILD_NUMBER_RESOLVED}  (Sparkle compares this)"
+    echo "    identity:     ${CODESIGN_IDENTITY}"
+}
 
 # Create DMG from an app bundle using mount/copy approach
 # This works around "Operation not permitted" errors with notarized apps
@@ -71,8 +127,9 @@ sync_version_metadata() {
     local plist_path="$ROOT_DIR/ImmiBridge/ImmiBridge/UI/Info.plist"
     local pbxproj_path="$ROOT_DIR/ImmiBridge/ImmiBridge.xcodeproj/project.pbxproj"
 
-    echo "==> Syncing app version metadata to v${VERSION}..."
+    echo "==> Syncing app version metadata to v${VERSION} (build ${BUILD_NUMBER_RESOLVED})..."
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$plist_path"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER_RESOLVED}" "$plist_path"
     perl -pi -e "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = ${VERSION};/g" "$pbxproj_path"
 
     if [[ -n "${SPARKLE_FEED_URL:-}" ]]; then
@@ -114,6 +171,42 @@ generate_appcast() {
     echo "==> Generating Sparkle appcast..."
     TAG="v${VERSION}" ASSETS_DIR="$assets_dir" SPARKLE_TOOLS_DIR="$SPARKLE_TOOLS_DIR" \
         "$ROOT_DIR/scripts/generate_appcast.sh"
+
+    # Everything this catches fails SILENTLY in production: the release uploads fine and
+    # existing installs are simply never offered it.
+    echo ""
+    echo "==> Verifying appcast..."
+    "$ROOT_DIR/scripts/verify_appcast.py" \
+        --appcast "$APPCAST_PATH" \
+        --assets "$assets_dir" \
+        --version "$VERSION" \
+        --build "$BUILD_NUMBER_RESOLVED" \
+        --tag "v${VERSION}"
+}
+
+# Guard against shipping a DMG built before the version bump.
+verify_dmg_contents() {
+    local dmg_path="$1"
+    local mount_point="/tmp/immibridge-verify-$$"
+
+    echo ""
+    echo "==> Verifying app inside the DMG..."
+    mkdir -p "$mount_point"
+    hdiutil attach "$dmg_path" -mountpoint "$mount_point" -nobrowse -quiet
+    local plist="$mount_point/ImmiBridge.app/Contents/Info.plist"
+    local short build
+    # Read with a fallback so a bad bundle cannot leave the image mounted under `set -e`.
+    short="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$plist" 2>/dev/null || echo '<unreadable>')"
+    build="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$plist" 2>/dev/null || echo '<unreadable>')"
+    hdiutil detach "$mount_point" -quiet
+    rmdir "$mount_point" 2>/dev/null || true
+
+    if [[ "$short" != "$VERSION" || "$build" != "$BUILD_NUMBER_RESOLVED" ]]; then
+        echo "ERROR: DMG contains ${short} (build ${build}),"
+        echo "       expected ${VERSION} (build ${BUILD_NUMBER_RESOLVED})."
+        exit 1
+    fi
+    echo "    DMG contains ${short} (build ${build})"
 }
 
 build_and_notarize() {
@@ -238,34 +331,52 @@ build_universal_and_notarize() {
     rm -f "$zip_path"
 }
 
+release_instructions() {
+    echo ""
+    echo "================================================"
+    echo "Release built: v${VERSION} (build ${BUILD_NUMBER_RESOLVED})"
+    for dmg in "$@"; do
+        echo "  $dmg"
+    done
+    echo ""
+    echo "1. Commit the version bump -- the build metadata was rewritten in place and is"
+    echo "   NOT yet committed:"
+    echo "     git add ImmiBridge/ImmiBridge/UI/Info.plist \\"
+    echo "             ImmiBridge/ImmiBridge.xcodeproj/project.pbxproj docs/appcast.xml"
+    echo "     git commit -m 'Bump version to ${VERSION} (build ${BUILD_NUMBER_RESOLVED})'"
+    echo "     git push"
+    echo ""
+    echo "2. Publish the release:"
+    echo -n "     gh release create v${VERSION}"
+    for dmg in "$@"; do
+        echo -n " '$dmg'"
+    done
+    echo " --title 'v${VERSION}' --generate-notes"
+    echo ""
+    echo "   Publishing the release triggers .github/workflows/appcast.yml, which"
+    echo "   regenerates and commits docs/appcast.xml from the uploaded DMG. Until that"
+    echo "   lands, existing installs will not see this version."
+    echo "================================================"
+}
+
+BUILD_NUMBER_RESOLVED="$(resolve_build_number)"
+preflight
 sync_version_metadata
 
 if [[ "$BUILD_MODE" == "separate" ]]; then
     # Build separate arch-specific DMGs (legacy mode)
     build_and_notarize "arm64"
     build_and_notarize "x86_64"
+    verify_dmg_contents "$DMG_ARM64_PATH"
+    verify_dmg_contents "$DMG_X86_64_PATH"
     generate_appcast
 
-    echo ""
-    echo "================================================"
-    echo "Release complete!"
-    echo "DMG (arm64): $DMG_ARM64_PATH"
-    echo "DMG (x86_64): $DMG_X86_64_PATH"
-    echo ""
-    echo "Upload to GitHub:"
-    echo "  gh release create v${VERSION} '$DMG_ARM64_PATH' '$DMG_X86_64_PATH' --title 'v${VERSION}' --generate-notes"
-    echo "================================================"
+    release_instructions "$DMG_ARM64_PATH" "$DMG_X86_64_PATH"
 else
     # Build universal binary (default, recommended for Sparkle)
     build_universal_and_notarize
+    verify_dmg_contents "$DMG_UNIVERSAL_PATH"
     generate_appcast
 
-    echo ""
-    echo "================================================"
-    echo "Release complete!"
-    echo "DMG (universal): $DMG_UNIVERSAL_PATH"
-    echo ""
-    echo "Upload to GitHub:"
-    echo "  gh release create v${VERSION} '$DMG_UNIVERSAL_PATH' --title 'v${VERSION}' --generate-notes"
-    echo "================================================"
+    release_instructions "$DMG_UNIVERSAL_PATH"
 fi

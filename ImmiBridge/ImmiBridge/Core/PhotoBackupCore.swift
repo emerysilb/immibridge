@@ -974,6 +974,47 @@ public final class PhotoBackupExporter {
             progress(event)
         }
 
+        // Asset mapping store for metadata sync. Built before the upload pipeline because the
+        // pipeline records `localIdentifier -> immichAssetId` into it as uploads complete.
+        let assetMappingStore: AssetMappingStore?
+        if let immichUpload = options.immichUpload, immichUpload.syncMetadata || immichUpload.metadataSyncOnly {
+            let mappingURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+                .appendingPathComponent("ImmiBridge", isDirectory: true)
+                .appendingPathComponent("asset-mappings.sqlite", isDirectory: false)
+            assetMappingStore = try? AssetMappingStore(sqliteURL: mappingURL)
+        } else {
+            assetMappingStore = nil
+        }
+
+        // Records the mapping the metadata-sync phase needs. This is the only mechanism that
+        // populates the store on Immich v3, where the device-id search does not exist — without
+        // it, metadata sync there can never resolve a single asset (see the v2-only recovery
+        // note in the metadata phase).
+        let onAssetPersisted: (@Sendable (String, String) -> Void)?
+        if let store = assetMappingStore {
+            onAssetPersisted = { deviceAssetId, immichAssetId in
+                // Only the unsuffixed deviceAssetId is a PHAsset localIdentifier; ":video",
+                // ":pairedVideo", ":adjustments" and ":edited" are sidecars of the same asset,
+                // and localIdentifiers themselves never contain a colon.
+                guard !deviceAssetId.contains(":") else { return }
+                if let existing = store.get(localIdentifier: deviceAssetId),
+                   existing.immichAssetId == immichAssetId {
+                    return
+                }
+                // Empty signature = "metadata not pushed yet", which is what the sync phase
+                // below tests against; a re-uploaded asset correctly re-syncs its metadata.
+                try? store.upsert(AssetMapping(
+                    localIdentifier: deviceAssetId,
+                    immichAssetId: immichAssetId,
+                    deviceAssetId: deviceAssetId,
+                    lastSyncedSignature: "",
+                    lastSyncedAt: .distantPast
+                ))
+            }
+        } else {
+            onAssetPersisted = nil
+        }
+
         let immichClient: ImmichClient?
         let immichPipeline: ImmichUploadPipeline?
         if let immichUpload = options.immichUpload {
@@ -986,7 +1027,8 @@ public final class PhotoBackupExporter {
                 serverURL: immichUpload.serverURL,
                 apiKey: immichUpload.apiKey,
                 session: session,
-                cancellationRegistry: registry
+                cancellationRegistry: registry,
+                logger: { progressWrapped(.message($0)) }
             )
             immichClient = client
             immichPipeline = ImmichUploadPipeline(
@@ -994,7 +1036,8 @@ public final class PhotoBackupExporter {
                 client: client,
                 progress: progressWrapped,
                 shouldCancel: shouldCancel,
-                failedUploadsDir: options.failedUploadsDir
+                failedUploadsDir: options.failedUploadsDir,
+                onAssetPersisted: onAssetPersisted
             )
         } else {
             immichClient = nil
@@ -1010,17 +1053,6 @@ public final class PhotoBackupExporter {
             manifest = try? ManifestStore(sqliteURL: manifestURL)
         } else {
             manifest = nil
-        }
-
-        // Asset mapping store for metadata sync
-        let assetMappingStore: AssetMappingStore?
-        if let immichUpload = options.immichUpload, immichUpload.syncMetadata || immichUpload.metadataSyncOnly {
-            let mappingURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-                .appendingPathComponent("ImmiBridge", isDirectory: true)
-                .appendingPathComponent("asset-mappings.sqlite", isDirectory: false)
-            assetMappingStore = try? AssetMappingStore(sqliteURL: mappingURL)
-        } else {
-            assetMappingStore = nil
         }
 
         let calendar = Calendar.current
@@ -1259,6 +1291,9 @@ public final class PhotoBackupExporter {
             var plannedEdited = 0
             var wouldSkipExisting = 0
             var wouldReplaceExisting = 0
+            // False once we know the dry run cannot tell existing assets from new ones, so the
+            // summary below reports "unknown" instead of asserting a number it did not measure.
+            var duplicatePredictionAvailable = true
 
             if let immichUpload = options.immichUpload, let immichPipeline {
                 // Reuse the existing "exists sync" batching logic to populate the pipeline's existing-id cache.
@@ -1270,68 +1305,84 @@ public final class PhotoBackupExporter {
                     progressWrapped(.message("ERROR Immich: could not fetch statistics: \(error)"))
                 }
 
-                var batches: [(ids: [String], units: Int)] = []
-                batches.reserveCapacity(max(1, filtered.count / immichUpload.existBatchSize))
-                var currentIds: [String] = []
-                currentIds.reserveCapacity(immichUpload.existBatchSize)
-                var currentUnits = 0
-
-                func finalizeBatch() {
-                    guard !currentIds.isEmpty else { return }
-                    batches.append((ids: currentIds, units: currentUnits))
-                    currentIds = []
+                // The whole pre-pass is /assets/exist, which only v2 serves. Running it on v3
+                // would answer "nothing exists" without issuing a single request, and the dry run
+                // would then confidently predict a full re-upload of an already-synced library.
+                let existing: Set<String>
+                if immichPipeline.serverIsLegacyV2() {
+                    var batches: [(ids: [String], units: Int)] = []
+                    batches.reserveCapacity(max(1, filtered.count / immichUpload.existBatchSize))
+                    var currentIds: [String] = []
                     currentIds.reserveCapacity(immichUpload.existBatchSize)
-                    currentUnits = 0
-                }
+                    var currentUnits = 0
 
-                for asset in filtered {
-                    if shouldCancel() { break }
+                    func finalizeBatch() {
+                        guard !currentIds.isEmpty else { return }
+                        batches.append((ids: currentIds, units: currentUnits))
+                        currentIds = []
+                        currentIds.reserveCapacity(immichUpload.existBatchSize)
+                        currentUnits = 0
+                    }
 
-                    var ids: [String] = []
-                    ids.reserveCapacity(4)
+                    for asset in filtered {
+                        if shouldCancel() { break }
 
-                    if options.mode == .originals || options.mode == .both {
-                        switch asset.mediaType {
-                        case .image:
-                            ids.append(asset.localIdentifier) // still
-                            if asset.mediaSubtypes.contains(.photoLive) {
-                                // Some Live Photos upload as pairedVideo, others as a live video resource; check both.
-                                ids.append(asset.localIdentifier + ":pairedVideo")
+                        var ids: [String] = []
+                        ids.reserveCapacity(4)
+
+                        if options.mode == .originals || options.mode == .both {
+                            switch asset.mediaType {
+                            case .image:
+                                ids.append(asset.localIdentifier) // still
+                                if asset.mediaSubtypes.contains(.photoLive) {
+                                    // Some Live Photos upload as pairedVideo, others as a live video resource; check both.
+                                    ids.append(asset.localIdentifier + ":pairedVideo")
+                                    ids.append(asset.localIdentifier + ":video")
+                                }
+                            case .video:
                                 ids.append(asset.localIdentifier + ":video")
+                            default:
+                                break
                             }
-                        case .video:
-                            ids.append(asset.localIdentifier + ":video")
-                        default:
-                            break
+                        }
+
+                        if options.mode == .edited || options.mode == .both {
+                            if (asset.mediaType == .image || asset.mediaType == .video), asset.hasAdjustments {
+                                ids.append(asset.localIdentifier + ":edited")
+                            }
+                        }
+
+                        if currentIds.count + ids.count > immichUpload.existBatchSize {
+                            finalizeBatch()
+                        }
+                        if !ids.isEmpty {
+                            currentIds.append(contentsOf: ids)
+                            currentUnits += 1
                         }
                     }
+                    finalizeBatch()
 
-                    if options.mode == .edited || options.mode == .both {
-                        if (asset.mediaType == .image || asset.mediaType == .video), asset.hasAdjustments {
-                            ids.append(asset.localIdentifier + ":edited")
-                        }
+                    do {
+                        try immichPipeline.performExistSyncBatches(batches: batches, totalUnits: filtered.count)
+                    } catch {
+                        progressWrapped(.message("ERROR Immich: exists sync failed: \(error)"))
+                        notes.append("Immich exist-check failed; counts may be inaccurate.")
                     }
 
-                    if currentIds.count + ids.count > immichUpload.existBatchSize {
-                        finalizeBatch()
-                    }
-                    if !ids.isEmpty {
-                        currentIds.append(contentsOf: ids)
-                        currentUnits += 1
-                    }
+                    existing = immichPipeline.snapshotExistingDeviceAssetIds()
+                    notes.append("Dry run uses Immich /assets/exist (device asset ids). Items uploaded from other devices/tools may still be detected as checksum-duplicates during a real run and be skipped.")
+                    progressWrapped(.message("Dry run: Immich reports \(existing.count) existing device-asset id(s) for this deviceId"))
+                } else {
+                    // ponytail: no prediction on v3 rather than a checksum simulation. Predicting
+                    // would mean hashing every original, i.e. exporting (and iCloud-downloading)
+                    // the whole library — the one thing a dry run promises not to do.
+                    // Ceiling: on v3 the dry run reports what it would *consider*, not what it
+                    // would transfer.
+                    existing = []
+                    duplicatePredictionAvailable = false
+                    notes.append("Immich v3 removed /assets/exist, so this dry run cannot tell which items the server already has. The real run detects duplicates by checksum and skips them, so it will usually upload far fewer than planned below.")
+                    progressWrapped(.message("Dry run: duplicate prediction unavailable on Immich v3 (the real run dedups by checksum)"))
                 }
-                finalizeBatch()
-
-                do {
-                    try immichPipeline.performExistSyncBatches(batches: batches, totalUnits: filtered.count)
-                } catch {
-                    progressWrapped(.message("ERROR Immich: exists sync failed: \(error)"))
-                    notes.append("Immich exist-check failed; counts may be inaccurate.")
-                }
-
-                let existing = immichPipeline.snapshotExistingDeviceAssetIds()
-                notes.append("Dry run uses Immich /assets/exist (device asset ids). Items uploaded from other devices/tools may still be detected as checksum-duplicates during a real run and be skipped.")
-                progressWrapped(.message("Dry run: Immich reports \(existing.count) existing device-asset id(s) for this deviceId"))
 
                 // Count planned outputs and whether each would be skipped/replaced, per the same deviceAssetId scheme
                 // the uploader uses (without exporting).
@@ -1378,8 +1429,10 @@ public final class PhotoBackupExporter {
                                 wouldSkipExisting += 1
                                 notes.append("\(filename) (\(out.label)) — would skip (already exists)")
                             }
-                        } else {
+                        } else if duplicatePredictionAvailable {
                             notes.append("\(filename) (\(out.label)) — would upload")
+                        } else {
+                            notes.append("\(filename) (\(out.label)) — would upload unless the server already has it")
                         }
                     }
                 }
@@ -1387,7 +1440,9 @@ public final class PhotoBackupExporter {
                 if immichUpload.syncAlbums {
                     notes.append("Album sync not simulated in dry run.")
                 }
-                if immichUpload.checksumPrecheck {
+                // The real run forces the checksum precheck on whenever we are not on v2, so the
+                // caveat has to follow that same condition rather than the configured flag alone.
+                if immichUpload.checksumPrecheck || !duplicatePredictionAvailable {
                     notes.append("Checksum-based duplicate detection is not simulated in dry run.")
                 }
             } else {
@@ -1411,7 +1466,11 @@ public final class PhotoBackupExporter {
 
             let wouldUploadNew = max(0, plannedUploads - wouldSkipExisting - wouldReplaceExisting)
             progressWrapped(.message("Dry run plan: scanned \(totalAssets) assets (\(imagesScanned) images, \(videosScanned) videos, \(livePhotosScanned) Live Photos)"))
-            progressWrapped(.message("Dry run plan: Immich planned \(plannedUploads) upload(s) — would upload \(wouldUploadNew), skip existing \(wouldSkipExisting), replace existing \(wouldReplaceExisting)"))
+            if duplicatePredictionAvailable {
+                progressWrapped(.message("Dry run plan: Immich planned \(plannedUploads) upload(s) — would upload \(wouldUploadNew), skip existing \(wouldSkipExisting), replace existing \(wouldReplaceExisting)"))
+            } else {
+                progressWrapped(.message("Dry run plan: Immich would consider \(plannedUploads) upload(s) — how many are already on the server is unknown here (Immich v3 has no device-id exist check); the real run skips checksum-duplicates"))
+            }
             if !notes.isEmpty {
                 for n in notes {
                     progressWrapped(.message("Dry run note: \(n)"))
@@ -1434,6 +1493,10 @@ public final class PhotoBackupExporter {
         // If Immich is enabled, perform a full "exists sync" up-front so we can show progress
         // and then start uploading with a complete existing-id set.
         if let immichUpload = options.immichUpload, let immichPipeline {
+            // Decide (and log) the server major before any work is routed, so the log explains
+            // why the exist-sync below either ran or was skipped. The answer is memoised.
+            _ = immichPipeline.serverIsLegacyV2()
+
             do {
                 let stats = try runSync { try await ImmichClient(serverURL: immichUpload.serverURL, apiKey: immichUpload.apiKey).getAssetStatistics() }
                 progressWrapped(.message("Immich: server has \(stats.total) assets (\(stats.images) images, \(stats.videos) videos)"))
@@ -2181,7 +2244,13 @@ public final class PhotoBackupExporter {
             var metadataErrors = 0
             var metadataRecovered = 0
             var metadataNotInImmich = 0
+            var metadataMappingUnknown = 0
             let metadataTotal = filtered.count
+
+            // Hoisted out of the per-asset loop: `runSync` spins up a detached Task plus a
+            // semaphore per call, and the answer is fixed for the run.
+            let metadataServerIsLegacyV2 = (try? runSync { await immichClient.isLegacyV2() }) ?? false
+            var announcedMappingUnavailable = false
 
             // Tag sync setup: read keywords from Photos via AppleScript and push to Immich.
             let keywordReader = PhotosKeywordReader()
@@ -2217,8 +2286,14 @@ public final class PhotoBackupExporter {
                 // Check if we have a mapping for this asset
                 var mapping = assetMappingStore.get(localIdentifier: asset.localIdentifier)
 
-                // If no mapping exists, try to recover from Immich by device asset ID
-                if mapping == nil {
+                // If no mapping exists, try to recover from Immich by device asset ID.
+                // ponytail: v2-only recovery. Immich v3 has no device-id search (and probing it
+                // there would return an arbitrary asset — see ImmichClient.getAssetIdByDeviceId).
+                // On v3 the mapping instead comes from the upload pipeline, which records every
+                // asset id the server confirms (`onAssetPersisted`). Ceiling: an asset that was
+                // put on the server by something other than this app has no mapping on v3 and
+                // cannot be looked up — reported separately below rather than as "not in Immich".
+                if mapping == nil, metadataServerIsLegacyV2 {
                     let deviceAssetId = asset.localIdentifier
                     do {
                         if let immichAssetId = try runSync({ try await immichClient.getAssetIdByDeviceId(deviceId: immichUpload.deviceId, deviceAssetId: deviceAssetId) }) {
@@ -2240,6 +2315,17 @@ public final class PhotoBackupExporter {
                 }
 
                 guard let mapping = mapping else {
+                    guard metadataServerIsLegacyV2 else {
+                        // Not the same thing as "not in Immich": on v3 we simply have no way to
+                        // ask. Saying "not in Immich" here would tell the user their library is
+                        // missing from the server when it is very likely all there.
+                        metadataMappingUnknown += 1
+                        if !announcedMappingUnavailable {
+                            announcedMappingUnavailable = true
+                            progressWrapped(.message("Metadata: some assets have no local Immich mapping. Immich v3 removed the device-id lookup, so their metadata can only be synced once this app has uploaded them itself."))
+                        }
+                        continue
+                    }
                     // No mapping = asset not in Immich, skip
                     metadataNotInImmich += 1
                     continue
@@ -2294,10 +2380,14 @@ public final class PhotoBackupExporter {
                 }
 
                 // Hidden/Archived - only update if different and (overwrite or Immich is false/nil)
-                let immichIsArchived = existingAsset?.isArchived ?? false
+                let immichIsArchived = existingAsset?.effectiveIsArchived ?? false
                 if currentMetadata.isHidden != immichIsArchived {
-                    if overwrite || !immichIsArchived {
-                        update.isArchived = overwrite ? currentMetadata.isHidden : (currentMetadata.isHidden ? true : nil)
+                    if overwrite {
+                        update.setArchived(currentMetadata.isHidden)
+                    } else if !immichIsArchived {
+                        // Additive mode: only ever archive, never un-archive. (The outer test
+                        // already guarantees isHidden == true in this branch.)
+                        update.setArchived(true)
                     }
                 }
 
@@ -2412,6 +2502,8 @@ public final class PhotoBackupExporter {
             if metadataSynced > 0 { summaryParts.append("synced \(metadataSynced)") }
             if metadataSkipped > 0 { summaryParts.append("skipped \(metadataSkipped)") }
             if metadataRecovered > 0 { summaryParts.append("recovered \(metadataRecovered) mappings") }
+            if metadataNotInImmich > 0 { summaryParts.append("not in Immich \(metadataNotInImmich)") }
+            if metadataMappingUnknown > 0 { summaryParts.append("no local mapping \(metadataMappingUnknown)") }
             if metadataErrors > 0 { summaryParts.append("errors \(metadataErrors)") }
             let summary = summaryParts.isEmpty ? "no changes" : summaryParts.joined(separator: ", ")
             progressWrapped(.message("Metadata: sync complete (\(summary))"))
@@ -3157,11 +3249,57 @@ final class ImmichClient {
     /// in defer so we never leak refs after completion.
     private let cancellationRegistry: InFlightCancellationRegistry?
 
+    /// Optional sink for one-off diagnostics that the user needs to see in the run log
+    /// (currently only the server-version decision). `ImmichClient` has no progress channel
+    /// of its own, and the version decision silently changes how the whole run is routed.
+    private let logger: (@Sendable (String) -> Void)?
+
+    /// Outcome of one `/server/version` probe. `cacheable` distinguishes a *definitive*
+    /// answer (the server responded, we just could not read a major out of it) from a
+    /// transport failure, which must not be memoised for the life of the run.
+    private struct ServerMajorProbe {
+        let major: Int?
+        let cacheable: Bool
+    }
+
+    /// Caches the `/server/version` probe. `ImmichClient` is shared across the upload
+    /// pipeline's concurrent hash/upload/network queues, so this has to be an actor (or a
+    /// lock) rather than a plain `var`. Holding the `Task` — not the value — means concurrent
+    /// first callers all await the same in-flight probe instead of racing to issue their own.
+    ///
+    /// A transport failure is deliberately *not* settled: a single 502 from a reverse proxy
+    /// at second 0 would otherwise pin a genuine v2 server into v3-compatible mode for the
+    /// whole run (no `/assets/exist` skip, no replace-on-change, no mapping recovery).
+    /// Retries are bounded so a server that is simply down does not re-probe per asset.
+    private actor ServerMajorCache {
+        private var settled: Int??
+        private var probe: Task<ServerMajorProbe, Never>?
+        private var transportFailures = 0
+        private let maxTransportFailures = 2
+
+        func major(fetch: @escaping @Sendable () async -> ServerMajorProbe) async -> (major: Int?, isFinal: Bool) {
+            if let settled { return (settled, true) }
+            if let probe { return (await probe.value.major, false) }
+
+            let task = Task<ServerMajorProbe, Never> { await fetch() }
+            probe = task
+            let result = await task.value
+            if !result.cacheable { transportFailures += 1 }
+            let isFinal = result.cacheable || transportFailures >= maxTransportFailures
+            if isFinal { settled = .some(result.major) }
+            probe = nil
+            return (result.major, isFinal)
+        }
+    }
+
+    private let serverMajorCache = ServerMajorCache()
+
     init(
         serverURL: URL,
         apiKey: String,
         session: URLSession = .shared,
-        cancellationRegistry: InFlightCancellationRegistry? = nil
+        cancellationRegistry: InFlightCancellationRegistry? = nil,
+        logger: (@Sendable (String) -> Void)? = nil
     ) {
         if serverURL.lastPathComponent == "api" {
             self.apiBase = serverURL
@@ -3171,10 +3309,54 @@ final class ImmichClient {
         self.apiKey = apiKey
         self.session = session
         self.cancellationRegistry = cancellationRegistry
+        self.logger = logger
     }
 
     func ping() async throws {
         _ = try await requestJSON(method: "GET", path: "server/ping", body: Optional<Data>.none) as ServerPingResponse
+    }
+
+    /// `GET /api/server/version` → `{"major":N,"minor":N,"patch":N}`. Present on both v2 and v3.
+    ///
+    /// The decision is always logged, because it silently re-routes the whole run: on a
+    /// misdetected v2 server the `/assets/exist` skip, replace-on-change and metadata mapping
+    /// recovery all go quiet, and without a log line there is nothing to explain it.
+    private func probeServerMajor() async -> ServerMajorProbe {
+        do {
+            let resp: ServerVersionResponse = try await requestJSON(
+                method: "GET",
+                path: "server/version",
+                body: Optional<Data>.none
+            )
+            logger?("Immich: server major \(resp.major) (\(resp.major <= 2 ? "legacy v2 endpoints enabled" : "v3-compatible mode"))")
+            return ServerMajorProbe(major: resp.major, cacheable: true)
+        } catch {
+            // The server answered, we just could not read a version out of it (non-2xx, or a
+            // body we cannot decode). That is a definitive "no usable version" — cache it.
+            let answered = (error is DecodingError) || ((error as NSError).domain == "immich")
+            logger?("Immich: /server/version unavailable (\(error)); using v3-compatible mode\(answered ? "" : " for now")")
+            return ServerMajorProbe(major: nil, cacheable: answered)
+        }
+    }
+
+    /// True only when the server *positively* reports Immich major version 2 or older.
+    ///
+    /// Deliberately fail-safe: an unreachable or unparseable `/server/version` answers `false`
+    /// ("treat as v3"). The v2-only endpoints are the dangerous ones — see the hazard note on
+    /// `getAssetIdByDeviceId` — so "unknown" must never unlock them. Guessing v3 when unsure
+    /// costs a fast path (and replace-on-change); guessing v2 would corrupt data.
+    func isLegacyV2() async -> Bool {
+        await legacyV2Decision().isLegacyV2
+    }
+
+    /// `isLegacyV2()` plus whether that answer is final. A non-final `false` means the probe hit
+    /// a transport failure and is still worth retrying, so callers that memoise the answer
+    /// themselves must not pin it — otherwise one 502 at second 0 downgrades a genuine v2 server
+    /// for the whole run.
+    func legacyV2Decision() async -> (isLegacyV2: Bool, isFinal: Bool) {
+        let (major, isFinal) = await serverMajorCache.major { [self] in await probeServerMajor() }
+        guard let major else { return (false, isFinal) }
+        return (major <= 2, isFinal)
     }
 
     func getMe() async throws {
@@ -3185,7 +3367,12 @@ final class ImmichClient {
         try await requestJSON(method: "GET", path: "assets/statistics", body: Optional<Data>.none)
     }
 
+    /// v2-only. Immich v3 removed `POST /api/assets/exist` outright (it 404s there), so we
+    /// skip the round-trip entirely and report "nothing known to exist" — which is exactly how
+    /// every caller already treats an empty result. On v3, duplicate detection falls through to
+    /// the checksum paths (`bulk-upload-check` / the `x-immich-checksum` upload header).
     func checkExistingAssets(deviceId: String, deviceAssetIds: [String]) async throws -> Set<String> {
+        guard await isLegacyV2() else { return [] }
         let dto = CheckExistingAssetsDto(deviceId: deviceId, deviceAssetIds: deviceAssetIds)
         let body = try JSONEncoder().encode(dto)
         let resp: CheckExistingAssetsResponseDto = try await requestJSON(method: "POST", path: "assets/exist", body: body)
@@ -3222,7 +3409,19 @@ final class ImmichClient {
         }
     }
 
+    /// v2-only, and the gate below is a *safety* gate, not an optimisation. DO NOT "simplify"
+    /// it into a try/catch.
+    ///
+    /// Immich v3 dropped the `deviceAssetId` / `deviceId` filters from the search DTO, and that
+    /// DTO is a Zod object declared **without** `.strict()` — so v3 does not reject the unknown
+    /// keys, it silently strips them. The POST therefore returns 200 with the results of an
+    /// *unfiltered* search, and `items[0]` is some arbitrary asset from the library. Callers
+    /// use the returned id to delete an asset or to write Photos metadata onto it, so trusting
+    /// it on v3 means silently clobbering an unrelated asset. There is no error to catch; only a
+    /// positively-detected v2 server makes this request meaningful.
     func getAssetIdByDeviceId(deviceId: String, deviceAssetId: String) async throws -> String? {
+        guard await isLegacyV2() else { return nil }
+
         let searchBody: [String: Any] = [
             "deviceAssetId": deviceAssetId,
             "deviceId": deviceId
@@ -3231,11 +3430,7 @@ final class ImmichClient {
 
         do {
             let data = try await requestRaw(method: "POST", path: "search/metadata", body: body)
-            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let assets = obj["assets"] as? [String: Any],
-               let items = assets["items"] as? [[String: Any]],
-               let first = items.first,
-               let id = first["id"] as? String {
+            if let id = firstSearchResultId(in: data) {
                 return id
             }
         } catch {
@@ -3243,6 +3438,18 @@ final class ImmichClient {
         }
 
         return nil
+    }
+
+    /// `POST /search/metadata` answers `{ "assets": { "items": [ { "id": ... } ] } }` on both majors.
+    private func firstSearchResultId(in data: Data) -> String? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let assets = obj["assets"] as? [String: Any],
+              let items = assets["items"] as? [[String: Any]],
+              let first = items.first,
+              let id = first["id"] as? String else {
+            return nil
+        }
+        return id
     }
 
     func deleteAssets(assetIds: [String]) async throws {
@@ -3257,7 +3464,11 @@ final class ImmichClient {
         var dateTimeOriginal: String?
         var description: String?
         var isFavorite: Bool?
-        var isArchived: Bool?  // Maps to PHAsset.isHidden
+        /// Immich `AssetVisibility`: "archive" | "timeline" | "hidden" | "locked".
+        /// Unconditional on both majors — `isArchived` was never a field on v2.5.6's
+        /// `UpdateAssetBase` either (it was accepted and ignored), so sending `visibility`
+        /// also fixes archive sync on v2. Set it via `setArchived(_:)`.
+        var visibility: String?
         var latitude: Double?
         var longitude: Double?
         var rating: Int?  // -1 to 5
@@ -3266,7 +3477,7 @@ final class ImmichClient {
             dateTimeOriginal: String? = nil,
             description: String? = nil,
             isFavorite: Bool? = nil,
-            isArchived: Bool? = nil,
+            visibility: String? = nil,
             latitude: Double? = nil,
             longitude: Double? = nil,
             rating: Int? = nil
@@ -3274,16 +3485,21 @@ final class ImmichClient {
             self.dateTimeOriginal = dateTimeOriginal
             self.description = description
             self.isFavorite = isFavorite
-            self.isArchived = isArchived
+            self.visibility = visibility
             self.latitude = latitude
             self.longitude = longitude
             self.rating = rating
         }
 
+        /// Maps `PHAsset.isHidden` onto the Immich visibility enum.
+        mutating func setArchived(_ archived: Bool) {
+            visibility = archived ? "archive" : "timeline"
+        }
+
         /// Check if any fields are set (to avoid empty updates)
         var hasChanges: Bool {
             dateTimeOriginal != nil || description != nil || isFavorite != nil ||
-            isArchived != nil || latitude != nil || longitude != nil || rating != nil
+            visibility != nil || latitude != nil || longitude != nil || rating != nil
         }
     }
 
@@ -3291,7 +3507,10 @@ final class ImmichClient {
     struct AssetResponseDto: Decodable {
         let id: String
         let isFavorite: Bool?
+        /// Older/v2 servers still return this boolean; v3 dropped it in favour of `visibility`.
         let isArchived: Bool?
+        /// v3 (and late v2) `AssetVisibility`: "archive" | "timeline" | "hidden" | "locked".
+        let visibility: String?
         let latitude: Double?
         let longitude: Double?
         let dateTimeOriginal: String?
@@ -3308,6 +3527,8 @@ final class ImmichClient {
         var effectiveLatitude: Double? { latitude ?? exifInfo?.latitude }
         var effectiveLongitude: Double? { longitude ?? exifInfo?.longitude }
         var effectiveDateTimeOriginal: String? { dateTimeOriginal ?? exifInfo?.dateTimeOriginal }
+        /// Prefer whichever archive representation the server actually sent.
+        var effectiveIsArchived: Bool { isArchived ?? (visibility == "archive") }
     }
 
     /// Fetch asset details from Immich
@@ -3394,13 +3615,21 @@ final class ImmichClient {
         metadata: [[String: Any]]
     ) async throws -> ImmichUploadResult {
         var fields: [(String, String)] = []
+        // Always sent, no version branch: v2.5.6's AssetMediaBase declares both @IsNotEmpty()
+        // and non-optional (omitting them is a 400 on every upload), while v3 removed them from
+        // the schema — and its Zod object has no `.strict()`, so it silently strips them.
+        // One payload serves both majors.
         fields.append(("deviceId", deviceId))
         fields.append(("deviceAssetId", deviceAssetId))
         fields.append(("fileCreatedAt", iso8601(fileCreatedAt)))
         fields.append(("fileModifiedAt", iso8601(fileModifiedAt)))
         fields.append(("filename", filename))
         if let durationSeconds {
-            fields.append(("duration", String(durationSeconds)))
+            // v2 takes any string here; v3 parses it with `z.coerce.number().int().min(0)` and
+            // rejects the old `String(durationSeconds)` ("5.0") on the `.int()` check.
+            // Integer milliseconds as a string satisfies both majors, so no version branch.
+            let durationMilliseconds = max(0, Int((durationSeconds * 1000).rounded()))
+            fields.append(("duration", String(durationMilliseconds)))
         }
         if let isFavorite {
             fields.append(("isFavorite", isFavorite ? "true" : "false"))
@@ -3549,6 +3778,10 @@ private final class ImmichUploadPipeline {
     private let progress: @Sendable (PhotoBackupProgress) -> Void
     private let shouldCancel: @Sendable () -> Bool
     private let failedUploadsDir: URL?
+    /// `(deviceAssetId, immichAssetId)` for every work item the server ends up holding —
+    /// freshly uploaded or answered as a checksum duplicate. Unlike `onImmichAssetId` (album
+    /// collection only, and nil unless the asset is in an album) this fires unconditionally.
+    private let onAssetPersisted: (@Sendable (String, String) -> Void)?
 
     private let stateQueue = DispatchQueue(label: "immich-pipeline-state")
     private let hashQueue = DispatchQueue(label: "immich-pipeline-hash", qos: .userInitiated, attributes: .concurrent)
@@ -3575,6 +3808,8 @@ private final class ImmichUploadPipeline {
 	    private var lastExistReportTotal: Int = -1
 	    private var existSyncCompleted: Bool = false
 
+    private var serverIsLegacyV2Cache: Bool?
+
     private var pendingBulkCheckById: [String: (work: WorkItem, sha1: String)] = [:]
     private var pendingBulkCheckFIFO: [String] = []
     private var bulkCheckInProgress: Bool = false
@@ -3586,13 +3821,15 @@ private final class ImmichUploadPipeline {
         client: ImmichClient,
         progress: @escaping @Sendable (PhotoBackupProgress) -> Void,
         shouldCancel: @escaping @Sendable () -> Bool,
-        failedUploadsDir: URL?
+        failedUploadsDir: URL?,
+        onAssetPersisted: (@Sendable (String, String) -> Void)? = nil
     ) {
         self.immich = immich
         self.client = client
         self.progress = progress
         self.shouldCancel = shouldCancel
         self.failedUploadsDir = failedUploadsDir
+        self.onAssetPersisted = onAssetPersisted
         self.inFlightLimiter = DispatchSemaphore(value: immich.maxInFlight)
         self.hashLimiter = DispatchSemaphore(value: immich.hashConcurrency)
         self.uploadLimiter = DispatchSemaphore(value: immich.uploadConcurrency)
@@ -3699,6 +3936,21 @@ private final class ImmichUploadPipeline {
 	        stateQueue.sync { existingDeviceAssetIds }
 	    }
 
+	    /// Memoised server-major answer. `ImmichClient` already caches the probe itself; this
+	    /// second layer only exists so the per-asset `enqueue` path doesn't spin up a detached
+	    /// Task + semaphore (`runSync`) for every single variant of every asset.
+	    ///
+	    /// Only a *final* answer is memoised — a probe that failed in transport is still
+	    /// retryable, and pinning it here would silently downgrade a real v2 server for the run.
+	    func serverIsLegacyV2() -> Bool {
+	        if let cached = stateQueue.sync(execute: { serverIsLegacyV2Cache }) { return cached }
+	        let decision = (try? runSync { await self.client.legacyV2Decision() }) ?? (isLegacyV2: false, isFinal: false)
+	        if decision.isFinal {
+	            stateQueue.sync { serverIsLegacyV2Cache = decision.isLegacyV2 }
+	        }
+	        return decision.isLegacyV2
+	    }
+
 	    func enqueue(
 	        fileURL: URL,
 	        deleteAfterUpload: URL?,
@@ -3717,7 +3969,15 @@ private final class ImmichUploadPipeline {
             throw ExportError.cancelled(filename: filename)
         }
 
-        let shouldUseFastExistSkip = !(immich.syncAlbums || immich.updateChangedAssets) && !immich.checksumPrecheck
+        // Immich v3 removed /assets/exist, so `existingDeviceAssetIds` is permanently empty there
+        // and the fast exist-skip below can never fire. That would leave a default-configured run
+        // (albums off, update-changed off) with no client-side duplicate gate at all — i.e. a full
+        // re-upload of the library, and a full iCloud re-download, on every run. The checksum
+        // bulk-upload-check works on both majors, so force it on when we are not on v2. We already
+        // hash every file on this path, so this costs one batched round-trip, not extra CPU.
+        // v2 keeps its exact previous routing.
+        let useChecksumPrecheck = immich.checksumPrecheck || !serverIsLegacyV2()
+        let shouldUseFastExistSkip = !(immich.syncAlbums || immich.updateChangedAssets) && !useChecksumPrecheck
         if shouldUseFastExistSkip, shouldSkipBecauseExists(deviceAssetId: deviceAssetId) {
             progress(.message("Immich: exists, skipping upload (\(deviceAssetId))"))
             if let deleteAfterUpload {
@@ -3761,7 +4021,7 @@ private final class ImmichUploadPipeline {
 
         if immich.skipHash {
             startUpload(work: work, sha1Hex: nil)
-        } else if !immich.checksumPrecheck {
+        } else if !useChecksumPrecheck {
             hashLimiter.wait()
             hashQueue.async { [weak self] in
                 defer { self?.hashLimiter.signal() }
@@ -3984,12 +4244,22 @@ private final class ImmichUploadPipeline {
                         }
                         self.finish(work: work, result: .success(r.assetId))
                     } else {
+                        // ponytail: v2-only in practice. v3 has no /assets/exist, so
+                        // `existingDeviceAssetIds` is always empty there and update-changed never
+                        // replaces — a changed asset uploads as a new one and the stale copy stays.
+                        // Ceiling: replacing on v3 would need a persisted deviceAssetId→assetId map.
                         let shouldReplaceExisting: Bool = self.stateQueue.sync {
                             self.immich.updateChangedAssets && self.existingDeviceAssetIds.contains(work.deviceAssetId)
                         }
 
                         if shouldReplaceExisting {
                             do {
+                                // Device-id search only. A checksum search for `sha1` cannot help
+                                // here: reaching this branch means bulk-upload-check just answered
+                                // "no asset of yours carries that checksum", and the search filter
+                                // sees a strict subset of what that check covers. It would also be
+                                // the wrong question — we want the *previous* asset's id, not the
+                                // id of the new bytes we are about to upload.
                                 let existingId = try runSync {
                                     try await self.client.getAssetIdByDeviceId(
                                         deviceId: self.immich.deviceId,
@@ -4128,6 +4398,9 @@ private final class ImmichUploadPipeline {
     private func finish(work: WorkItem, result: Result<String?, Error>) {
         if case .success(let id) = result {
             work.onImmichAssetId?(id)
+            if let id {
+                onAssetPersisted?(work.deviceAssetId, id)
+            }
         }
         work.completion(result)
         group.leave()
@@ -4227,6 +4500,11 @@ private struct UserMeResponse: Decodable {
     let id: String?
 }
 
+/// `GET /api/server/version` — semver as numeric fields on both v2 and v3.
+private struct ServerVersionResponse: Decodable {
+    let major: Int
+}
+
 struct AssetStatisticsResponse: Decodable {
     let images: Int
     let videos: Int
@@ -4267,7 +4545,9 @@ private struct AssetUploadResponse: Decodable {
     let status: String
 }
 
-private func sha1HexFile(_ url: URL) throws -> String {
+/// Internal (not file-private) so the folder-source syncer can reuse the exact same digest
+/// the Photos pipeline sends as `x-immich-checksum`.
+func sha1HexFile(_ url: URL) throws -> String {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
     var hasher = Insecure.SHA1()

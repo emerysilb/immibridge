@@ -1,9 +1,17 @@
 name: Update Sparkle Appcast
 
+# Publishing a GitHub release is what should update the appcast -- that is the moment
+# the DMG exists at its download URL. Previously this only ran on push, so every release
+# needed an empty "trigger appcast workflow" commit pushed by hand afterwards; forget it
+# and the release is live on GitHub but no installed copy is ever offered the update.
 on:
-  push:
-    branches:
-      - main
+  release:
+    types: [published, edited]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to regenerate the appcast from (defaults to latest)"
+        required: false
 
 permissions:
   contents: write
@@ -15,13 +23,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # A release event checks out the tag, which is detached and cannot be pushed.
+          # The appcast lives on main.
+          ref: main
 
-      - name: Resolve latest release tag
+      - name: Resolve release tag
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          tag="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName -q .tagName)"
+          tag="${EVENT_TAG:-${INPUT_TAG:-}}"
+          if [[ -z "$tag" ]]; then
+            tag="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName -q .tagName)"
+          fi
+          echo "Using tag: ${tag}"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Download release assets
@@ -34,6 +52,7 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --dir /tmp/immi-assets \
             --pattern "*.dmg"
+          ls -la /tmp/immi-assets
 
       - name: Generate appcast
         env:
@@ -49,6 +68,16 @@ jobs:
             https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/Sparkle-for-Swift-Package-Manager.zip
           unzip -q /tmp/sparkle.zip -d /tmp/sparkle
           scripts/generate_appcast.sh
+
+      - name: Verify appcast
+        # Catches the silent failures: a build number that did not increase, or a
+        # signature the shipped app will reject. Both publish fine and then simply
+        # never reach anyone.
+        run: |
+          scripts/verify_appcast.py \
+            --appcast docs/appcast.xml \
+            --assets /tmp/immi-assets \
+            --tag "${{ steps.release.outputs.tag }}"
 
       - name: Commit appcast
         run: |

@@ -1,0 +1,42 @@
+# One stack, any Immich version. Driven by IMMICH_TAG / IMMICH_PORT from run.sh,
+# so testing a new release is a version string, not a new file.
+#
+# Machine learning is disabled and the ML container omitted: it pulls gigabytes and
+# nothing here exercises it.
+services:
+  immich-server:
+    image: ghcr.io/immich-app/immich-server:${IMMICH_TAG}
+    volumes:
+      - upload:/data
+    environment:
+      DB_HOSTNAME: database
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_DATABASE_NAME: immich
+      REDIS_HOSTNAME: redis
+      IMMICH_MACHINE_LEARNING_ENABLED: "false"
+    ports:
+      - '${IMMICH_PORT}:2283'
+    depends_on:
+      - redis
+      - database
+    restart: unless-stopped
+  redis:
+    image: docker.io/valkey/valkey:9
+    healthcheck:
+      test: redis-cli ping || exit 1
+    restart: unless-stopped
+  database:
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: immich
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    shm_size: 128mb
+    restart: unless-stopped
+volumes:
+  pgdata:
+  upload:
