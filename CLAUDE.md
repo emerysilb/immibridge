@@ -87,7 +87,27 @@ differ in one way that fails *silently* rather than loudly — see `tests/immich
 
 ## Release Process
 
-1. Update version in `.env`
-2. Run `./scripts/release.sh` (builds universal binary, signs, notarizes, creates DMG)
-3. Upload DMG to GitHub release: `gh release create v{VERSION} build/ImmiBridge-{VERSION}.dmg`
-4. CI (`.github/workflows/appcast.yml`) auto-generates appcast.xml on push to main
+1. Update `VERSION` in `.env`
+2. Run `./scripts/release.sh` (builds universal binary, signs, notarizes, creates DMG,
+   regenerates and **verifies** the appcast)
+3. Commit the version bump — `release.sh` rewrites `Info.plist`, `project.pbxproj` and
+   `docs/appcast.xml` in place but does not commit them
+4. `gh release create v{VERSION} build/ImmiBridge-{VERSION}.dmg --generate-notes`
+
+Publishing the release triggers `.github/workflows/appcast.yml`, which regenerates
+`docs/appcast.xml` from the uploaded DMG and commits it to `main`. Until that lands,
+installed copies will not see the new version.
+
+### Why Sparkle updates silently fail
+
+Every failure mode here is invisible — the release builds, signs, notarizes, uploads,
+and existing users are simply never offered it. `scripts/verify_appcast.py` runs
+automatically in both `release.sh` and CI to catch them:
+
+- **`CFBundleVersion` did not increase.** Sparkle compares this, *not* the marketing
+  version. `release.sh` now derives it from the last appcast entry so it cannot be
+  forgotten; override with `BUILD_NUMBER`.
+- **Signature does not match the shipped `SUPublicEDKey`.** Clients download the update
+  and then refuse to install it.
+- **Appcast never regenerated.** The workflow used to run only on push, so a release
+  needed a hand-pushed empty commit afterwards. It now runs on release publish.
