@@ -85,7 +85,12 @@ public final class FileImmichSyncer {
         config.timeoutIntervalForResource = options.requestTimeoutSeconds
         config.httpMaximumConnectionsPerHost = immich.uploadConcurrency
         let session = URLSession(configuration: config)
-        let client = ImmichClient(serverURL: immich.serverURL, apiKey: immich.apiKey, session: session)
+        let client = ImmichClient(
+            serverURL: immich.serverURL,
+            apiKey: immich.apiKey,
+            session: session,
+            logger: { progress(.message($0)) }
+        )
 
         var files: [(root: URL, url: URL, relPath: String, createdAt: Date, modifiedAt: Date)] = []
         var scanned = 0
@@ -140,10 +145,16 @@ public final class FileImmichSyncer {
             return "file:\(file.relPath)"
         }
 
+        // Immich v3 removed POST /assets/exist. On v3 the sweep below would answer "nothing
+        // exists" for every file, so we skip it and fall back to per-file checksum dedup
+        // (bulk-upload-check, which both majors serve). v2 keeps the cheap batch API and never
+        // hashes a file it can skip outright.
+        let serverIsLegacyV2 = (try? runSync { await client.isLegacyV2() }) ?? false
+
         // Batch exist check
         var existingIds = Set<String>()
         let deviceIds = files.map { deviceAssetId(for: $0) }
-        if !deviceIds.isEmpty {
+        if serverIsLegacyV2, !deviceIds.isEmpty {
             let batchSize = max(1, immich.existBatchSize)
             var checked = 0
             while checked < deviceIds.count {
@@ -173,6 +184,7 @@ public final class FileImmichSyncer {
             progress(.fileCopying(index: idx + 1, total: files.count, relativePath: file.relPath))
 
             let id = deviceAssetId(for: file)
+            // Only reachable on v2 — `existingIds` is empty on v3 (no /assets/exist there).
             if existingIds.contains(id) {
                 if options.updateChanged {
                     do {
@@ -206,6 +218,29 @@ public final class FileImmichSyncer {
             do {
                 // iCloud Drive: download on demand; then best-effort re-evict.
                 try ensureUbiquitousItemIsDownloaded(file.url, timeoutSeconds: options.requestTimeoutSeconds)
+
+                // v3 duplicate gate. Hash *after* the download above, otherwise an evicted
+                // iCloud placeholder would be digested instead of the real bytes.
+                // ponytail: one bulk-upload-check per file rather than a batched pre-pass —
+                // this loop is serial anyway, so it's one small JSON round-trip against the
+                // full multipart upload it can save. Ceiling: no batching, no parallelism.
+                let sha1Hex: String?
+                if serverIsLegacyV2 {
+                    sha1Hex = nil
+                } else {
+                    let sha1 = try sha1HexFile(file.url)
+                    sha1Hex = sha1
+                    let results = try runSync {
+                        try await client.bulkUploadCheck(items: [AssetBulkUploadCheckItem(checksum: sha1, id: id)])
+                    }
+                    if let first = results.first, first.action == "reject", first.reason == "duplicate" {
+                        skipped += 1
+                        progress(.message("Immich: exists, skipping upload (\(id))"))
+                        evictUbiquitousItemIfPossible(file.url)
+                        continue
+                    }
+                }
+
                 let filename = file.url.lastPathComponent
                 let meta: [[String: Any]] = [[
                     "key": "mobile-app",
@@ -221,7 +256,7 @@ public final class FileImmichSyncer {
                 _ = try runSync {
                     try await client.uploadAsset(
                         fileURL: file.url,
-                        sha1Hex: nil,
+                        sha1Hex: sha1Hex,
                         deviceId: immich.deviceId,
                         deviceAssetId: id,
                         filename: filename,

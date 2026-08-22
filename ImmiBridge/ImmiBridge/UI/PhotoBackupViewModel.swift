@@ -1126,8 +1126,12 @@ final class PhotoBackupViewModel: ObservableObject {
                     existReq.httpBody = existData
                     let start = Date()
                     let (_, existResp) = try await URLSession.shared.data(for: existReq)
-                    guard let http3 = existResp as? HTTPURLResponse, (200...299).contains(http3.statusCode) else {
-                        throw NSError(domain: "immich", code: (existResp as? HTTPURLResponse)?.statusCode ?? -3)
+                    let existStatus = (existResp as? HTTPURLResponse)?.statusCode ?? -3
+                    // Immich v3 removed /assets/exist, so a 404 here means "v3 server", not
+                    // "broken connection" — ping + users/me above already proved the server and
+                    // the API key are good. Anything else still counts as a failure.
+                    guard (200...299).contains(existStatus) || existStatus == 404 else {
+                        throw NSError(domain: "immich", code: existStatus)
                     }
                     let ms = Int(Date().timeIntervalSince(start) * 1000)
 
