@@ -34,7 +34,17 @@ xcodebuild -project ImmiBridge/ImmiBridge.xcodeproj -scheme ImmiBridge -configur
 ./scripts/generate_appcast.sh
 ```
 
-There are no linters or automated test suites in active use. Testing is manual — run the app and exercise backup workflows.
+No linters. Testing is mostly manual — run the app and exercise backup workflows.
+
+The one exception is Immich API compatibility, which has a real suite:
+
+```bash
+./tests/immich/run.sh           # v2.5.6, v3.0.3, v3.1.0 in throwaway Docker stacks
+./tests/immich/run.sh v3.2.0    # check a newly released Immich version
+```
+
+Run it before touching anything in `ImmichClient` or `ImmichUploadPipeline`. v2 and v3
+differ in one way that fails *silently* rather than loudly — see `tests/immich/README.md`.
 
 ## Architecture
 
