@@ -12,6 +12,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private let statusMenu = NSMenu()
 
+    /// Strongly retained so "Open Main Window" still works after the window is closed.
+    /// SwiftUI releases WindowGroup windows on close by default, which is why reopening
+    /// used to fall through to building a brand new window.
+    private var mainWindow: NSWindow?
+
+    /// Menu-bar agent mode: keep running with no Dock icon.
+    ///
+    /// Defaults to **false**. Defaulting to true would make the Dock icon vanish for
+    /// everyone on upgrade, which is a surprising thing for an update to do to you.
+    static var hideDockIcon: Bool {
+        get { UserDefaults.standard.bool(forKey: "hideDockIcon") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "hideDockIcon")
+            NotificationCenter.default.post(name: .hideDockIconPreferenceChanged, object: nil)
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Request notification permissions
         NotificationManager.shared.requestAuthorization()
@@ -32,7 +49,72 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
+        // Track which window is the real main window so we can re-show that instance
+        // rather than constructing a replacement.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowDidBecomeKey),
+            name: NSWindow.didBecomeKeyNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(hideDockPreferenceChanged),
+            name: .hideDockIconPreferenceChanged,
+            object: nil
+        )
+
         setupStatusItem()
+        applyActivationPolicy(forMainWindowVisible: hasVisibleMainWindow())
+    }
+
+    /// Dock icon click when the Dock icon is showing.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { openMainWindow() }
+        return true
+    }
+
+    // MARK: - Window identification
+
+    /// A window we would consider "the app's main window".
+    ///
+    /// The `NSStatusBarWindow` backing the menu bar item is visible and is **not** an
+    /// `NSPanel`, so a plain `!($0 is NSPanel)` test matches it. That was the bug: with the
+    /// real window closed, "Open Main Window" would find the status bar window, order it
+    /// front, and return — so nothing appeared to happen.
+    private func isEligibleMainWindow(_ window: NSWindow) -> Bool {
+        if window is NSPanel { return false }
+        if String(describing: type(of: window)).contains("StatusBar") { return false }
+        // SwiftUI's menu bar extra and other helper windows carry no title bar.
+        if !window.styleMask.contains(.titled) { return false }
+        return true
+    }
+
+    private func hasVisibleMainWindow() -> Bool {
+        NSApp.windows.contains { isEligibleMainWindow($0) && $0.isVisible && !$0.isMiniaturized }
+    }
+
+    private func applyActivationPolicy(forMainWindowVisible visible: Bool) {
+        // Only drop to accessory when the user actually asked for agent mode.
+        let policy: NSApplication.ActivationPolicy = (visible || !Self.hideDockIcon) ? .regular : .accessory
+        if NSApp.activationPolicy() != policy {
+            NSApp.setActivationPolicy(policy)
+        }
+    }
+
+    @objc private func hideDockPreferenceChanged() {
+        applyActivationPolicy(forMainWindowVisible: hasVisibleMainWindow())
+        rebuildStatusMenu()
+    }
+
+    @objc private func windowDidBecomeKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, isEligibleMainWindow(window) else { return }
+        if mainWindow !== window {
+            mainWindow = window
+            // Keep the instance alive across close so we can re-show it.
+            window.isReleasedWhenClosed = false
+        }
+        applyActivationPolicy(forMainWindowVisible: true)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -46,19 +128,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func windowDidClose(_ notification: Notification) {
-        // When a window closes, check if any visible non-panel windows remain
-        // If not, hide the app from the dock (accessory mode = menu bar only)
+        guard let window = notification.object as? NSWindow, isEligibleMainWindow(window) else { return }
         Task { @MainActor in
-            // Small delay to let the window finish closing
-            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
-
-            let hasVisibleWindows = NSApp.windows.contains { window in
-                !window.isMiniaturized && window.isVisible && !(window is NSPanel)
-            }
-
-            if !hasVisibleWindows {
-                NSApp.setActivationPolicy(.accessory)
-            }
+            // Let the window finish closing before asking what is still on screen.
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            applyActivationPolicy(forMainWindowVisible: hasVisibleMainWindow())
         }
     }
 
@@ -91,6 +165,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(checkForUpdates),
             keyEquivalent: "u"
         ))
+
+        let dockItem = NSMenuItem(
+            title: "Hide Dock Icon",
+            action: #selector(toggleHideDockIcon),
+            keyEquivalent: ""
+        )
+        dockItem.state = Self.hideDockIcon ? .on : .off
+        statusMenu.addItem(dockItem)
 
         if model.isRunning {
             if model.isPaused {
@@ -151,14 +233,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return image
     }
 
-    @objc private func openMainWindow() {
+    @objc func openMainWindow() {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
-        if let existing = NSApp.windows.first(where: { !($0 is NSPanel) && $0.isVisible })
-            ?? NSApp.windows.first(where: { !($0 is NSPanel) })
+        // Prefer the window we retained; fall back to any eligible one. Both filters skip
+        // the status bar window, which is neither a panel nor titled.
+        if let existing = mainWindow
+            ?? NSApp.windows.first(where: { isEligibleMainWindow($0) && $0.isVisible })
+            ?? NSApp.windows.first(where: { isEligibleMainWindow($0) })
         {
             existing.makeKeyAndOrderFront(nil)
+            mainWindow = existing
+            existing.isReleasedWhenClosed = false
             return
         }
 
@@ -176,7 +263,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 .environmentObject(model)
                 .environmentObject(scheduler)
         )
+        window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
+        mainWindow = window
+    }
+
+    @objc private func toggleHideDockIcon() {
+        Self.hideDockIcon.toggle()
     }
 
     @objc private func runBackupNow() {
