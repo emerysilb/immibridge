@@ -163,38 +163,22 @@ struct MenuBarView: View {
     }
 
     private func openMainWindow() {
-        // Prefer reusing an existing non-panel window (menu bar extra uses a panel).
-        if let existing = NSApp.windows.first(where: { !($0 is NSPanel) && $0.isVisible })
-            ?? NSApp.windows.first(where: { !($0 is NSPanel) })
-        {
-            NSApp.setActivationPolicy(.regular)
-            NSApp.activate(ignoringOtherApps: true)
-            existing.makeKeyAndOrderFront(nil)
+        // Single implementation lives in AppDelegate: it excludes the status bar window
+        // (which is neither a panel nor titled) and retains the real window so reopening
+        // works after a close.
+        if let delegate = NSApp.delegate as? AppDelegate {
+            delegate.openMainWindow()
             return
         }
-
-        // Create a new main window if none exist (only available on macOS 13+).
-        // Post notification to request window opening (handled by WindowOpenerView)
+        // Fallback: ask SwiftUI to create one.
         NotificationCenter.default.post(name: .openMainWindowRequested, object: nil)
-
-        // SwiftUI creates the window asynchronously; bring it to front once it exists.
-        Task { @MainActor in
-            for _ in 0..<20 {
-                if let w = NSApp.windows.first(where: { !($0 is NSPanel) }) {
-                    NSApp.setActivationPolicy(.regular)
-                    NSApp.activate(ignoringOtherApps: true)
-                    w.makeKeyAndOrderFront(nil)
-                    return
-                }
-                try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
-            }
-        }
     }
 }
 
 // Notification name for requesting main window to open
 extension Notification.Name {
     static let openMainWindowRequested = Notification.Name("openMainWindowRequested")
+    static let hideDockIconPreferenceChanged = Notification.Name("hideDockIconPreferenceChanged")
 }
 
 /// Helper view that handles window opening on macOS 13+

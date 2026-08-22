@@ -1092,10 +1092,27 @@ final class PhotoBackupViewModel: ObservableObject {
         var pingReq = URLRequest(url: apiBase.appendingPathComponent("server/ping"))
         pingReq.setValue(apiKey, forHTTPHeaderField: "x-api-key")
 
+        // URLSession on its own can fail with "Local network prohibited" without macOS
+        // ever presenting the Local Network dialog — and until it is presented once, the
+        // app is absent from System Settings entirely, so the error we show below tells
+        // the user to flip a switch that does not exist. A Bonjour browse is what forces
+        // the prompt. See LocalNetworkPermission.
+        let isLocal = isLocalNetworkURL(immichServerURL)
+        if isLocal {
+            LocalNetworkPermission.requestPrompt()
+            // The sheet is modal to the user, not to us: allow time to actually answer it.
+            pingReq.timeoutInterval = 20
+        }
+
         Task.detached { [weak self] in
             var lastError: Error?
             for attempt in 1...3 {
                 do {
+                    if isLocal, attempt == 1 {
+                        // Let TCC get the sheet on screen before the request starts, so a
+                        // first-run connection test does not fail before it is answered.
+                        try? await Task.sleep(nanoseconds: 800_000_000)
+                    }
                     let (pingData, pingResp) = try await URLSession.shared.data(for: pingReq)
                     guard let http = pingResp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                         throw NSError(domain: "immich", code: (pingResp as? HTTPURLResponse)?.statusCode ?? -1)
@@ -1147,8 +1164,10 @@ final class PhotoBackupViewModel: ObservableObject {
                     if attempt < 3 {
                         await MainActor.run { [weak self] in
                             self?.immichTestStatus = "Testing… (\(attempt + 1)/3)"
+                            // Re-arm the browse so a dismissed sheet can come back.
+                            if isLocal { LocalNetworkPermission.requestPrompt() }
                         }
-                        try? await Task.sleep(nanoseconds: 600_000_000) // 0.6s
+                        try? await Task.sleep(nanoseconds: isLocal ? 1_200_000_000 : 600_000_000)
                         continue
                     }
                 }
@@ -1175,7 +1194,9 @@ final class PhotoBackupViewModel: ObservableObject {
 
                         This may be because ImmiBridge needs permission to access your local network.
 
-                        Please go to System Settings → Privacy & Security → Local Network and enable access for ImmiBridge, then try again.
+                        Open System Settings → Privacy & Security → Local Network and enable access for ImmiBridge, then try again.
+
+                        If ImmiBridge is not listed there at all, quit and reopen the app and test the connection again — macOS only adds an app to that list once it has asked for access.
 
                         Error: \(errorText)
                         """
