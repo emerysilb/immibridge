@@ -132,6 +132,7 @@ final class PhotoBackupViewModel: ObservableObject {
     @Published var includeAdjustmentData: Bool = true
     @Published var includeHiddenPhotos: Bool = false
     @Published var filenameFormat: FilenameFormat = .dateAndOriginal
+    @Published var skipExistingByName: Bool = false
     @Published var allowNetwork: Bool = true
     @Published var dryRun: Bool = false
     @Published var limit: Int? = nil
@@ -281,6 +282,7 @@ final class PhotoBackupViewModel: ObservableObject {
         if let raw = defaults.string(forKey: "filenameFormat"), let fmt = FilenameFormat(rawValue: raw) {
             filenameFormat = fmt
         }
+        skipExistingByName = defaults.object(forKey: "skipExistingByName") as? Bool ?? false
 
         // Date range filter persistence
         dateFilterEnabled = defaults.bool(forKey: "dateFilterEnabled")
@@ -635,6 +637,7 @@ final class PhotoBackupViewModel: ObservableObject {
         defaults.set(includeAdjustmentData, forKey: "includeAdjustmentData")
         defaults.set(includeHiddenPhotos, forKey: "includeHiddenPhotos")
         defaults.set(filenameFormat.rawValue, forKey: "filenameFormat")
+        defaults.set(skipExistingByName, forKey: "skipExistingByName")
         defaults.set(immichServerURL, forKey: "immichServerURL")
         defaults.set(immichUploadConcurrency, forKey: "immichUploadConcurrency")
         defaults.set(albumSource.rawValue, forKey: "albumSource")
@@ -757,7 +760,8 @@ final class PhotoBackupViewModel: ObservableObject {
             collisionPolicy: .skipIdenticalElseRename,
             includeHiddenPhotos: includeHiddenPhotos,
             filenameFormat: filenameFormat,
-            folderOrganization: folderOrganization.coreValue
+            folderOrganization: folderOrganization.coreValue,
+            skipIfNameExistsInDestination: skipExistingByName
         )
 
         // Capture references for the detached task

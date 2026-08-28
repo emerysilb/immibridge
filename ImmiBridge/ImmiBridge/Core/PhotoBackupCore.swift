@@ -474,6 +474,13 @@ public struct PhotoBackupOptions: Sendable {
     public var filenameFormat: FilenameFormat
     /// Controls how exported files are arranged within the folder destination.
     public var folderOrganization: FolderOrganization
+    /// When true, a folder export skips any file whose target name already exists in the
+    /// destination, without consulting the manifest and without downloading the asset from
+    /// iCloud first. This is what makes an interrupted run resumable when the manifest is
+    /// missing or its signatures no longer match (Photos rewrites `modificationDate` for
+    /// reasons unrelated to pixel content). Matching is by name only — an asset edited in
+    /// Photos since it was exported will therefore not be re-exported.
+    public var skipIfNameExistsInDestination: Bool
 
     public init(
         folderExport: FolderExportOptions? = nil,
@@ -499,7 +506,8 @@ public struct PhotoBackupOptions: Sendable {
         iCloudTimeoutMultiplier: Double = 2.0,
         includeHiddenPhotos: Bool = false,
         filenameFormat: FilenameFormat = .dateAndOriginal,
-        folderOrganization: FolderOrganization = .byDate
+        folderOrganization: FolderOrganization = .byDate,
+        skipIfNameExistsInDestination: Bool = false
     ) {
         self.folderExport = folderExport
         self.immichUpload = immichUpload
@@ -525,6 +533,7 @@ public struct PhotoBackupOptions: Sendable {
         self.includeHiddenPhotos = includeHiddenPhotos
         self.filenameFormat = filenameFormat
         self.folderOrganization = folderOrganization
+        self.skipIfNameExistsInDestination = skipIfNameExistsInDestination
     }
 }
 
@@ -1623,6 +1632,68 @@ public final class PhotoBackupExporter {
             ))
         }
 
+        // Destination paths this run has already taken responsibility for. Two distinct assets
+        // can compute the same output name (notably with `.originalOnly`), so a file this run
+        // just wrote is not evidence of a previous backup — without this, the second asset
+        // would be silently dropped instead of being renamed by the collision policy.
+        var pathsClaimedThisRun: Set<String> = []
+
+        func claimPath(_ url: URL?) {
+            guard options.skipIfNameExistsInDestination, let url else { return }
+            pathsClaimedThisRun.insert(url.standardizedFileURL.path)
+        }
+
+        /// A zero-byte file is the fingerprint of a write that never finished. The temp dir lives
+        /// on the internal disk, so placing a file onto an external volume is a cross-device
+        /// copy — killing the app or unplugging the drive mid-copy can leave a stub behind.
+        /// Treat such a file as absent so it is exported again instead of trusted forever.
+        func isNonEmptyFile(_ url: URL) -> Bool {
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                  values.isRegularFile == true,
+                  let size = values.fileSize
+            else { return false }
+            return size > 0
+        }
+
+        func nameAlreadyInDestination(_ desiredURL: URL?) -> Bool {
+            guard options.skipIfNameExistsInDestination, let desiredURL else { return false }
+            if pathsClaimedThisRun.contains(desiredURL.standardizedFileURL.path) { return false }
+            return isNonEmptyFile(desiredURL)
+        }
+
+        /// Returns a file already in `dir` whose name is `stem` plus any extension. Used for
+        /// rendered edits, whose extension is only known after the render completes.
+        func existingFileMatchingStem(in dir: URL?, stem: String) -> URL? {
+            guard options.skipIfNameExistsInDestination, let dir else { return nil }
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return nil }
+            let prefix = (stem + ".").lowercased()
+            for name in names where name.lowercased().hasPrefix(prefix) {
+                let url = dir.appendingPathComponent(name, isDirectory: false)
+                if pathsClaimedThisRun.contains(url.standardizedFileURL.path) { continue }
+                if !isNonEmptyFile(url) { continue }
+                return url
+            }
+            return nil
+        }
+
+        var nameSkips = 0
+
+        /// Single decision point for "this variant is already in the destination". Records the
+        /// claim on `desiredURL` either way, so a later asset computing the same name still gets
+        /// exported (and renamed) rather than skipped.
+        func shouldSkipExistingFile(key: String, signature: String, desiredURL: URL?) -> Bool {
+            defer { claimPath(desiredURL) }
+            if options.backupMode != .full,
+               shouldSkipByManifest(key: key, signature: signature, desiredURL: desiredURL) {
+                return true
+            }
+            if nameAlreadyInDestination(desiredURL) {
+                nameSkips += 1
+                return true
+            }
+            return false
+        }
+
         // Skip export/upload phase if metadata sync only mode
         let skipExportPhase = options.immichUpload?.metadataSyncOnly == true
 
@@ -1693,6 +1764,13 @@ public final class PhotoBackupExporter {
                 guard FileManager.default.fileExists(atPath: sourceURL.path) else { return }
                 for f in additionalFolders {
                     let target = f.url.appendingPathComponent(filename, isDirectory: false)
+                    let key = photoManifestKey(assetId: asset.localIdentifier, variant: variant, folderTag: f.tag)
+                    if nameAlreadyInDestination(target) {
+                        nameSkips += 1
+                        claimPath(target)
+                        upsertManifestIfPossible(key: key, signature: signature, desiredURL: target)
+                        continue
+                    }
                     do {
                         let outcome = try placeTempFile(
                             tmpURL: sourceURL,
@@ -1706,7 +1784,7 @@ public final class PhotoBackupExporter {
                             case .skippedIdentical(let u): return u
                             }
                         }()
-                        let key = photoManifestKey(assetId: asset.localIdentifier, variant: variant, folderTag: f.tag)
+                        claimPath(placedURL)
                         upsertManifestIfPossible(key: key, signature: signature, desiredURL: placedURL)
                     } catch {
                         progressWrapped(.message("ERROR copying to album folder \(f.tag): \(error)"))
@@ -1780,7 +1858,7 @@ public final class PhotoBackupExporter {
                     let desiredURL = outDir?.appendingPathComponent(filename, isDirectory: false)
                     let key = photoManifestKey(assetId: asset.localIdentifier, variant: "pairedVideo", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "pairedVideo", resourceName: paired.originalFilename)
-                    if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
+                    if shouldSkipExistingFile(key: key, signature: sig, desiredURL: desiredURL) {
                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
                         if let primarySource = desiredURL {
                             mirrorExportToAdditionalFolders(sourceURL: primarySource, filename: filename, variant: "pairedVideo", signature: sig)
@@ -1832,7 +1910,7 @@ public final class PhotoBackupExporter {
                     let desiredURL = outDir?.appendingPathComponent(filename, isDirectory: false)
                     let key = photoManifestKey(assetId: asset.localIdentifier, variant: "original", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "original", resourceName: still.originalFilename)
-                    if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
+                    if shouldSkipExistingFile(key: key, signature: sig, desiredURL: desiredURL) {
                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
                         if let primarySource = desiredURL {
                             mirrorExportToAdditionalFolders(sourceURL: primarySource, filename: filename, variant: "original", signature: sig)
@@ -1884,7 +1962,7 @@ public final class PhotoBackupExporter {
                     let desiredURL = outDir?.appendingPathComponent(filename, isDirectory: false)
                     let key = photoManifestKey(assetId: asset.localIdentifier, variant: "adjustments", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "adjustments", resourceName: adjustments.originalFilename)
-                    if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
+                    if shouldSkipExistingFile(key: key, signature: sig, desiredURL: desiredURL) {
                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
                         if let primarySource = desiredURL {
                             mirrorExportToAdditionalFolders(sourceURL: primarySource, filename: filename, variant: "adjustments", signature: sig)
@@ -1936,7 +2014,7 @@ public final class PhotoBackupExporter {
                     let desiredURL = outDir?.appendingPathComponent(filename, isDirectory: false)
                     let key = photoManifestKey(assetId: asset.localIdentifier, variant: "video", folderTag: primaryFolderTag)
                     let sig = photoSignature(asset: asset, variant: "video", resourceName: video.originalFilename)
-                    if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
+                    if shouldSkipExistingFile(key: key, signature: sig, desiredURL: desiredURL) {
                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
                         if let primarySource = desiredURL {
                             mirrorExportToAdditionalFolders(sourceURL: primarySource, filename: filename, variant: "video", signature: sig)
@@ -1994,7 +2072,12 @@ public final class PhotoBackupExporter {
                         mirrorExportToAdditionalFolders(sourceURL: placedURL, filename: filename, variant: "edited", signature: sig)
                     }
 
-                    if options.backupMode != .full,
+                    if let existing = existingFileMatchingStem(in: outDir, stem: "\(base)_edited") {
+                        nameSkips += 1
+                        claimPath(existing)
+                        upsertManifestIfPossible(key: key, signature: sig, desiredURL: existing)
+                        mirrorEditedTo(placedURL: existing)
+                    } else if options.backupMode != .full,
                        let manifest,
                        let dest = options.folderExport?.destination,
                        let entry = manifest.get(key: key),
@@ -2013,6 +2096,7 @@ public final class PhotoBackupExporter {
                                 lastSeenRunId: runId,
                                 deletedAt: nil
                             ))
+                            claimPath(url)
                             mirrorEditedTo(placedURL: url)
                         } else {
                             // Fall back to rendering if file is missing.
@@ -2033,9 +2117,11 @@ public final class PhotoBackupExporter {
                                 if let folderOutcome = outcome.folderOutcome {
                                     switch folderOutcome {
                                     case .exported(let url):
+                                        claimPath(url)
                                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: url)
                                         mirrorEditedTo(placedURL: url)
                                     case .skippedIdentical(let existing):
+                                        claimPath(existing)
                                         upsertManifestIfPossible(key: key, signature: sig, desiredURL: existing)
                                         mirrorEditedTo(placedURL: existing)
                                     }
@@ -2066,9 +2152,11 @@ public final class PhotoBackupExporter {
                             if let folderOutcome = outcome.folderOutcome {
                                 switch folderOutcome {
                                 case .exported(let url):
+                                    claimPath(url)
                                     upsertManifestIfPossible(key: key, signature: sig, desiredURL: url)
                                     mirrorEditedTo(placedURL: url)
                                 case .skippedIdentical(let existing):
+                                    claimPath(existing)
                                     upsertManifestIfPossible(key: key, signature: sig, desiredURL: existing)
                                     mirrorEditedTo(placedURL: existing)
                                 }
@@ -2089,7 +2177,7 @@ public final class PhotoBackupExporter {
                         let desiredURL = outDir?.appendingPathComponent("\(base)_edited.\(ext)", isDirectory: false)
                         let key = photoManifestKey(assetId: asset.localIdentifier, variant: "edited")
                         let sig = photoSignature(asset: asset, variant: "edited", resourceName: editedVideo.originalFilename)
-                        if options.backupMode != .full, shouldSkipByManifest(key: key, signature: sig, desiredURL: desiredURL) {
+                        if shouldSkipExistingFile(key: key, signature: sig, desiredURL: desiredURL) {
                             upsertManifestIfPossible(key: key, signature: sig, desiredURL: desiredURL)
                         } else {
                             do {
@@ -2137,6 +2225,10 @@ public final class PhotoBackupExporter {
                 completed += 1
                 processedIds.insert(asset.localIdentifier)
             }
+        }
+
+        if nameSkips > 0 {
+            progressWrapped(.message("Skipped \(nameSkips) file(s) already in the destination (matched by filename)"))
         }
 
         // Only wait for Immich pipeline if not cancelled
