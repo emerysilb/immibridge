@@ -455,6 +455,14 @@ private extension ContentView {
                     .font(.caption)
                     .foregroundColor(.secondary)
 
+                Toggle("Skip files already in destination (match by name)", isOn: $model.skipExistingByName)
+                    .disabled(model.isRunning)
+                    .help("Before downloading anything from iCloud, check whether the destination folder already holds a file with the name this backup would give it. If it does, the asset is left alone. Use this to resume an interrupted folder backup: it does not depend on the manifest database, so it still works when the manifest was lost or when Photos changed an asset's modification date. Applies to the folder destination only.")
+
+                Text("Names must match the Filename Format above — if you exported with a different format, files will not be recognized. Because matching is by name only, a photo you edited in Photos after it was exported will not be re-exported.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
             }
             .padding(14)
             .background(Color.black.opacity(0.14))
